@@ -257,9 +257,9 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   };
 
   const selectDeckB = (track: Track) => {
+    // Loading a track onto Deck B must never move the crossfader or change Deck A's level.
+    // The two decks are independent: the crossfader is the only control that changes their mix.
     setDeckB(track);
-    setCrossfader(100);
-    void playerController.setDjDeckVolumes(1, 0);
   };
 
   const nextTracks = session.queue.filter((track) => track.id !== deckA?.id);
