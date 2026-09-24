@@ -351,6 +351,16 @@ export class PlayerController {
     this.syncTransitionTicker();
   }
 
+  /** DJ Mode starts Deck A without invoking Zuno's global playback ownership. */
+  async playDjActive(): Promise<boolean> {
+    return this.audioEngine.playDjActive();
+  }
+
+  /** DJ Mode pauses Deck A without touching Deck B. */
+  async pauseDjActive(): Promise<boolean> {
+    return this.audioEngine.pauseDjActive();
+  }
+
   async loadTrack(track: Track, preserveDjDeck = false): Promise<void> {
     logInternalInfo("PlayerController.loadTrack start", { trackId: track.id, preserveDjDeck });
     // A normal Zuno load owns the whole playback surface and must not leave a DJ standby
