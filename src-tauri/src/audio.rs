@@ -260,6 +260,17 @@ pub(crate) enum Command {
         fade_ms: u64,
         reply: Sender<bool>,
     },
+    /// Starts a decoded standby deck without swapping deck ownership.
+    PlayStandby {
+        track_id: String,
+        volume: f32,
+        reply: Sender<bool>,
+    },
+    /// Sets the output levels of the active and standby decks independently.
+    SetDeckVolumes {
+        active_volume: f32,
+        standby_volume: f32,
+    },
     /// Whether `track_id` is sitting decoded on the standby deck.
     HasStandby {
         track_id: String,
@@ -846,6 +857,30 @@ impl Engine {
                     self.decks[outgoing].clear();
                 }
                 let _ = reply.send(true);
+            }
+            Command::PlayStandby { track_id, volume, reply } => {
+                let standby = self.standby();
+                if self.decks[standby].track_id.as_deref() != Some(track_id.as_str())
+                    || !self.decks[standby].is_healthy()
+                {
+                    let _ = reply.send(false);
+                    return false;
+                }
+                self.cancel_fade();
+                self.decks[standby].sink.set_speed(self.rate);
+                self.decks[standby].sink.set_volume(volume.clamp(0.0, self.output_volume()));
+                self.decks[standby].sink.play();
+                let _ = reply.send(true);
+            }
+            Command::SetDeckVolumes { active_volume, standby_volume } => {
+                self.cancel_fade();
+                self.decks[self.active]
+                    .sink
+                    .set_volume(active_volume.clamp(0.0, self.output_volume()));
+                let standby = self.standby();
+                self.decks[standby]
+                    .sink
+                    .set_volume(standby_volume.clamp(0.0, self.output_volume()));
             }
             Command::HasStandby { track_id, reply } => {
                 let standby = self.standby();
