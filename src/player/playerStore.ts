@@ -176,6 +176,10 @@ class ActivePlayerController implements PlayerControllerActions {
   generateQueueAfter = (index: number) =>
     tabManager.getActivePlayer().generateQueueAfter(index);
   cueTrack = (track: Track) => tabManager.getActivePlayer().cueTrack(track);
+  playCuedTrack = (track: Track, volume = 0) =>
+    tabManager.getActivePlayer().playCuedTrack(track, volume);
+  setDjDeckVolumes = (activeVolume: number, standbyVolume: number) =>
+    tabManager.getActivePlayer().setDjDeckVolumes(activeVolume, standbyVolume);
   mixToTrack = (track: Track, fadeMs = 4000) => tabManager.getActivePlayer().mixToTrack(track, fadeMs);
 }
 
