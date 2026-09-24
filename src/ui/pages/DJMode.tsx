@@ -120,54 +120,108 @@ function Deck({
 }
 
 export function DJMode({ session, playerController, onClose }: DJModeProps) {
-  const [deckB, setDeckB] = useState<Track | null>(session.queue[session.queueIndex + 1] ?? session.queue[0] ?? null);
-  const [mixLength, setMixLength] = useState(4000);
-  const [crossfader, setCrossfader] = useState(50);
+  const [deckB, setDeckB] = useState<Track | null>(
+    session.queue[session.queueIndex + 1] ?? session.queue.find((track) => track.id !== session.currentTrack?.id) ?? null,
+  );
+  const [crossfader, setCrossfader] = useState(0);
+  const [deckBPlaying, setDeckBPlaying] = useState(false);
+  const [deckBPosition, setDeckBPosition] = useState(0);
+  const [deckBStartedAt, setDeckBStartedAt] = useState<number | null>(null);
   const [hotCuesA, setHotCuesA] = useState<(number | null)[]>([null, null, null, null]);
   const [hotCuesB, setHotCuesB] = useState<(number | null)[]>([null, null, null, null]);
-  const [position, setPosition] = useState(session.positionSec);
-  const lastTrackRef = useRef(session.currentTrack?.id);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setPosition(playerController.getCurrentTime());
-    }, 80);
-    return () => window.clearInterval(timer);
-  }, [playerController]);
-
-  useEffect(() => {
-    if (lastTrackRef.current !== session.currentTrack?.id) {
-      lastTrackRef.current = session.currentTrack?.id;
-      setPosition(0);
-      setHotCuesA([null, null, null, null]);
-    }
-  }, [session.currentTrack?.id]);
-
-  useEffect(() => {
-    if (deckB) void playerController.cueTrack(deckB);
-  }, [deckB, playerController]);
 
   const deckA = session.currentTrack;
   const durationA = deckA?.durationSec ?? playerController.getDuration();
   const durationB = deckB?.durationSec ?? 0;
-  const nextTracks = session.queue.filter((track) => track.id !== deckA?.id).slice(0, 12);
 
-  const mix = async () => {
+  // Keep Deck A tied to the real player session. This is deliberately derived from session
+  // rather than copied into local state, so loading a song anywhere in Zuno immediately updates
+  // the DJ deck.
+  useEffect(() => {
+    if (!deckB || deckB.id === deckA?.id) {
+      const replacement = session.queue.find((track) => track.id !== deckA?.id) ?? null;
+      setDeckB(replacement);
+      setDeckBPlaying(false);
+      setDeckBPosition(0);
+      setDeckBStartedAt(null);
+    }
+  }, [deckA?.id, session.queue, deckB]);
+
+  // Deck B has its own visual clock. Rust owns the actual audio clock; this clock is only for
+  // showing the prepared standby deck while it plays simultaneously.
+  useEffect(() => {
+    if (!deckBPlaying || !deckBStartedAt || !durationB) return;
+    const timer = window.setInterval(() => {
+      const elapsed = (Date.now() - deckBStartedAt) / 1000;
+      setDeckBPosition(Math.min(durationB, elapsed));
+      if (elapsed >= durationB) {
+        setDeckBPlaying(false);
+        setDeckBStartedAt(null);
+      }
+    }, 80);
+    return () => window.clearInterval(timer);
+  }, [deckBPlaying, deckBStartedAt, durationB]);
+
+  // Prepare Deck B whenever the selection changes.
+  useEffect(() => {
     if (!deckB) return;
-    const ok = await playerController.mixToTrack(deckB, mixLength);
-    if (ok) {
-      const oldA = deckA;
-      setPosition(0);
-      setDeckB(oldA ?? nextTracks[0] ?? null);
-      if (oldA) void playerController.cueTrack(oldA);
+    setDeckBPosition(0);
+    setDeckBStartedAt(null);
+    setDeckBPlaying(false);
+    void playerController.cueTrack(deckB);
+  }, [deckB, playerController]);
+
+  const applyCrossfader = (value: number) => {
+    const normalized = Math.max(0, Math.min(100, value)) / 100;
+    setCrossfader(value);
+    // Equal-power curve: the middle keeps both decks present instead of creating a volume dip.
+    const angle = normalized * Math.PI / 2;
+    void playerController.setDjDeckVolumes(
+      Math.cos(angle),
+      Math.sin(angle),
+    );
+
+    // Like a professional DJ app, moving toward a silent prepared deck can start that deck.
+    if (deckB && normalized > 0 && !deckBPlaying) {
+      void playerController.playCuedTrack(deckB, Math.sin(angle)).then((started) => {
+        if (!started) return;
+        setDeckBPlaying(true);
+        setDeckBStartedAt(Date.now());
+      });
+    }
+  };
+
+  const playA = async () => {
+    await playerController.play();
+    void playerController.setDjDeckVolumes(
+      Math.cos((crossfader / 100) * Math.PI / 2),
+      Math.sin((crossfader / 100) * Math.PI / 2),
+    );
+  };
+
+  const playB = async () => {
+    if (!deckB) return;
+    const normalized = crossfader / 100;
+    const started = await playerController.playCuedTrack(deckB, Math.sin(normalized * Math.PI / 2));
+    if (started) {
+      setDeckBPlaying(true);
+      setDeckBStartedAt(Date.now());
     }
   };
 
   const setCue = (side: "A" | "B", index: number) => {
-    const time = side === "A" ? position : 0;
+    const time = side === "A" ? session.positionSec : deckBPosition;
     const setter = side === "A" ? setHotCuesA : setHotCuesB;
     setter((current) => current.map((value, i) => i === index ? (value == null ? time : null) : value));
   };
+
+  const selectDeckB = (track: Track) => {
+    setDeckB(track);
+    setCrossfader(100);
+    void playerController.setDjDeckVolumes(1, 0);
+  };
+
+  const nextTracks = session.queue.filter((track) => track.id !== deckA?.id);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl bg-[#0b0b0d] text-foreground">
@@ -176,56 +230,103 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
           <div className="text-[10px] font-bold tracking-[0.28em] text-primary">ZUNO DJ</div>
           <div className="text-xs text-muted-foreground">Two-deck performance mode</div>
         </div>
-        <div className="flex items-center gap-2">
-          <label className="flex items-center gap-2 rounded-lg bg-white/5 px-3 py-2 text-[10px] text-muted-foreground">
-            MIX {mixLength / 1000}s
-            <input type="range" min={0} max={12000} step={500} value={mixLength} onChange={(e) => setMixLength(Number(e.target.value))} className="w-24 accent-[var(--color-primary)]" />
-          </label>
-          <button type="button" onClick={onClose} className="rounded-lg bg-white/5 px-3 py-2 text-xs hover:bg-white/10">Exit DJ</button>
-        </div>
+        <button type="button" onClick={onClose} className="rounded-lg bg-white/5 px-3 py-2 text-xs hover:bg-white/10">Exit DJ</button>
       </header>
 
       <div className="min-h-0 flex-1 overflow-auto p-4">
         <div className="mb-4 flex items-center gap-3">
           <div className="flex-1 rounded-xl bg-white/5 px-4 py-3">
-            <div className="text-[10px] font-bold tracking-widest text-muted-foreground">BPM</div>
-            <div className="text-xl font-bold">128.0</div>
+            <div className="text-[10px] font-bold tracking-widest text-muted-foreground">DECK A</div>
+            <div className="truncate text-sm font-bold">{deckA?.title ?? "No track playing"}</div>
           </div>
-          <button type="button" onClick={mix} disabled={!deckB} className="rounded-xl bg-primary px-6 py-3 text-xs font-black tracking-widest text-primary-foreground disabled:opacity-40">MIX A → B</button>
+          <div className="rounded-xl bg-white/5 px-4 py-3 text-center">
+            <div className="text-[10px] font-bold tracking-widest text-muted-foreground">CROSSFADER</div>
+            <div className="text-xl font-bold">{Math.round(crossfader)}%</div>
+          </div>
           <div className="flex-1 rounded-xl bg-white/5 px-4 py-3 text-right">
-            <div className="text-[10px] font-bold tracking-widest text-muted-foreground">SYNC</div>
-            <div className="text-xl font-bold">ON</div>
+            <div className="text-[10px] font-bold tracking-widest text-muted-foreground">DECK B</div>
+            <div className="truncate text-sm font-bold">{deckB?.title ?? "Load a track"}</div>
           </div>
         </div>
 
         <div className="flex min-h-0 flex-col gap-4 xl:flex-row">
-          <Deck side="A" track={deckA} position={position} duration={durationA} playing={session.status === "playing"} onPlay={() => void playerController.play()} onCue={() => void playerController.seekTo(hotCuesA[0] ?? 0)} onSeek={(value) => { setPosition(value); void playerController.seekTo(value); }} onHotCue={(i) => setCue("A", i)} hotCues={hotCuesA} />
-          <Deck side="B" track={deckB} position={0} duration={durationB} playing={false} onPlay={mix} onCue={() => { if (deckB) void playerController.cueTrack(deckB); }} onSeek={() => {}} onHotCue={(i) => setCue("B", i)} hotCues={hotCuesB} />
+          <Deck
+            side="A"
+            track={deckA}
+            position={session.positionSec}
+            duration={durationA}
+            playing={session.status === "playing"}
+            onPlay={() => void playA()}
+            onCue={() => void playerController.seekTo(hotCuesA[0] ?? 0)}
+            onSeek={(value) => void playerController.seekTo(value)}
+            onHotCue={(i) => setCue("A", i)}
+            hotCues={hotCuesA}
+          />
+          <Deck
+            side="B"
+            track={deckB}
+            position={deckBPosition}
+            duration={durationB}
+            playing={deckBPlaying}
+            onPlay={() => void playB()}
+            onCue={() => {
+              if (deckB) void playerController.cueTrack(deckB);
+            }}
+            onSeek={() => {}}
+            onHotCue={(i) => setCue("B", i)}
+            hotCues={hotCuesB}
+          />
+        </div>
+
+        <div className="mt-4 rounded-2xl bg-card/60 p-5">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-xs font-bold tracking-widest">MIXER</div>
+            <div className="text-[10px] text-muted-foreground">A ← Crossfader → B</div>
+          </div>
+          <input
+            aria-label="Crossfader"
+            type="range"
+            min={0}
+            max={100}
+            value={crossfader}
+            onChange={(event) => applyCrossfader(Number(event.target.value))}
+            className="w-full accent-[var(--color-primary)]"
+          />
+          <div className="mt-1 flex justify-between text-[9px] font-bold text-muted-foreground">
+            <span>DECK A</span><span>CENTER MIX</span><span>DECK B</span>
+          </div>
+          <p className="mt-3 text-[10px] text-muted-foreground">
+            Both decks can play at the same time. Move the crossfader left/right to blend or switch between them.
+          </p>
         </div>
 
         <div className="mt-4 rounded-2xl bg-card/60 p-4">
           <div className="mb-3 flex items-center justify-between">
-            <div className="text-xs font-bold tracking-widest">MIXER</div>
-            <div className="text-[10px] text-muted-foreground">Crossfader</div>
+            <div className="text-xs font-bold tracking-widest">LOAD ON DECK B</div>
+            <div className="text-[10px] text-muted-foreground">Choose a track to prepare</div>
           </div>
-          <input aria-label="Crossfader" type="range" min={0} max={100} value={crossfader} onChange={(e) => setCrossfader(Number(e.target.value))} className="w-full accent-[var(--color-primary)]" />
-          <div className="mt-1 flex justify-between text-[9px] font-bold text-muted-foreground"><span>DECK A</span><span>{crossfader}%</span><span>DECK B</span></div>
-          <div className="mt-4 grid grid-cols-3 gap-3">
-            {[["LOW", "A"], ["MID", "A"], ["HIGH", "A"]].map(([label, side]) => <div key={label + side} className="rounded-xl bg-background/60 p-3"><div className="mb-2 text-[9px] font-bold text-muted-foreground">{side} {label}</div><input type="range" min={-12} max={12} defaultValue={0} className="w-full accent-[var(--color-primary)]" /></div>)}
-          </div>
-        </div>
-
-        <div className="mt-4 rounded-2xl bg-card/60 p-4">
-          <div className="mb-3 text-xs font-bold tracking-widest">DECK B — QUEUE</div>
           <div className="grid gap-1">
             {nextTracks.map((track) => (
-              <button key={track.id} type="button" onClick={() => setDeckB(track)} className={cn("flex items-center gap-3 rounded-xl px-3 py-2 text-left hover:bg-white/5", deckB?.id === track.id && "bg-primary/10") }>
+              <button
+                key={track.id}
+                type="button"
+                onClick={() => selectDeckB(track)}
+                className={cn(
+                  "flex items-center gap-3 rounded-xl px-3 py-2 text-left hover:bg-white/5",
+                  deckB?.id === track.id && "bg-primary/10",
+                )}
+              >
                 <TrackArtwork artworkUrl={track.artworkUrl} className="size-9 rounded-lg" size={48} iconSize={15} />
-                <span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{track.title}</span><span className="block truncate text-[10px] text-muted-foreground">{track.artist}</span></span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-medium">{track.title}</span>
+                  <span className="block truncate text-[10px] text-muted-foreground">{track.artist}</span>
+                </span>
                 <SkipNextIcon size={14} className="text-muted-foreground" />
               </button>
             ))}
-            {!nextTracks.length && <div className="py-6 text-center text-xs text-muted-foreground">Add more tracks to the queue to populate Deck B.</div>}
+            {!nextTracks.length && (
+              <div className="py-6 text-center text-xs text-muted-foreground">Add more tracks to the queue to populate Deck B.</div>
+            )}
           </div>
         </div>
       </div>
