@@ -1481,6 +1481,19 @@ export class PlayerController {
     }
   }
 
+  /** Starts a track already decoded on the standby DJ deck without swapping active ownership. */
+  async playCuedTrack(track: Track, volume = 0): Promise<boolean> {
+    if (!this.audioEngine.usesRustAudio()) return false;
+    const ready = await this.cueTrack(track);
+    if (!ready) return false;
+    return this.audioEngine.playPreloaded(track.id, volume);
+  }
+
+  /** Sets the active/standby deck volumes from the DJ crossfader. */
+  async setDjDeckVolumes(activeVolume: number, standbyVolume: number): Promise<void> {
+    await this.audioEngine.setDeckVolumes(activeVolume, standbyVolume);
+  }
+
   /** Crossfades from the active deck into a track explicitly cued by DJ Mode. */
   async mixToTrack(track: Track, fadeMs = 4000): Promise<boolean> {
     if (this.audioEngine.usesRustAudio()) {
