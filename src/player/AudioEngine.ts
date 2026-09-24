@@ -803,6 +803,13 @@ export class AudioEngine {
     return rustAudio.seekStandby(videoId, seconds);
   }
 
+  /** Returns the decoded duration of a track currently sitting on the Rust standby deck. */
+  getPreloadedDuration(videoId: string): number {
+    return this.useRustAudio && this.rustStandbyTrackId === videoId
+      ? this.rustStandbyDurationSec
+      : 0;
+  }
+
   /** Sets the active and standby deck levels independently for the DJ crossfader. */
   async setDeckVolumes(activeVolume: number, standbyVolume: number): Promise<void> {
     if (!this.useRustAudio) return;
