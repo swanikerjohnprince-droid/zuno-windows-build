@@ -150,6 +150,14 @@ export function setDeckVolumes(activeVolume: number, standbyVolume: number): Pro
   return invoke("native_audio_set_deck_volumes", { activeVolume, standbyVolume });
 }
 
+export function pauseStandby(trackId: string): Promise<boolean> {
+  return invoke<boolean>("native_audio_pause_standby", { trackId });
+}
+
+export function seekStandby(trackId: string, seconds: number): Promise<boolean> {
+  return invoke<boolean>("native_audio_seek_standby", { trackId, positionSec: Math.max(0, seconds) });
+}
+
 export function hasStandby(trackId: string): Promise<boolean> {
   return invoke<boolean>("native_audio_has_standby", { trackId });
 }
