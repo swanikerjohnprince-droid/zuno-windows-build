@@ -52,7 +52,7 @@ function Deck({
   onLoad: () => void;
   hotCues: (number | null)[];
 }) {
-  const waveform = useMemo(() => buildWave(`${track?.id ?? side}-${side}`, 180, position * 3.2), [track?.id, side, Math.floor(position * 10)]);
+  const waveform = useMemo(\n    () => buildWave(`${track?.id ?? side}-${side}`, 180, playing ? position * 3.2 : 0),\n    [track?.id, side, playing, Math.floor(position * 10)],\n  );
   const pct = duration ? Math.min(100, (position / duration) * 100) : 0;
 
   return (
@@ -130,6 +130,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   );
   const [crossfader, setCrossfader] = useState(0);
   const [deckBPlaying, setDeckBPlaying] = useState(false);
+  const [deckBDuration, setDeckBDuration] = useState(0);
   const [deckBPosition, setDeckBPosition] = useState(0);
   const [deckBStartedAt, setDeckBStartedAt] = useState<number | null>(null);
   const [deckAPosition, setDeckAPosition] = useState(0);
@@ -139,7 +140,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
 
   const deckA = session.currentTrack;
   const durationA = deckA?.durationSec ?? playerController.getDuration();
-  const durationB = deckB?.durationSec ?? 0;
+  const durationB = deckBDuration || deckB?.durationSec || 0;
 
   // The player store intentionally does not emit on every audio sample, so the DJ surface
   // keeps its own lightweight visual clock while the real audio engine remains the source of truth.
@@ -162,6 +163,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
       const replacement = session.queue.find((track) => track.id !== deckA?.id) ?? null;
       setDeckB(replacement);
       setDeckBPlaying(false);
+      setDeckBDuration(0);
       setDeckBPosition(0);
       setDeckBStartedAt(null);
     }
@@ -188,7 +190,11 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     setDeckBPosition(0);
     setDeckBStartedAt(null);
     setDeckBPlaying(false);
-    void playerController.cueTrack(deckB);
+    setDeckBDuration(deckB.durationSec || 0);
+    void playerController.cueTrack(deckB).then((ready) => {
+      if (!ready) return;
+      setDeckBDuration(playerController.getCuedDuration(deckB));
+    });
   }, [deckB, playerController]);
 
   const applyCrossfader = (value: number) => {
@@ -322,6 +328,27 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
           />
         </div>
 
+        <div className="mt-4 rounded-2xl bg-card/60 p-5">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-xs font-bold tracking-widest">MIXER</div>
+            <div className="text-[10px] text-muted-foreground">A ← Crossfader → B</div>
+          </div>
+          <input
+            aria-label="Crossfader"
+            type="range"
+            min={0}
+            max={100}
+            value={crossfader}
+            onChange={(event) => applyCrossfader(Number(event.target.value))}
+            className="w-full accent-[var(--color-primary)]"
+          />
+          <div className="mt-1 flex justify-between text-[9px] font-bold text-muted-foreground">
+            <span>DECK A</span><span>CENTER MIX</span><span>DECK B</span>
+          </div>
+          <p className="mt-3 text-[10px] text-muted-foreground">
+            Both decks can play at the same time. Move the crossfader left/right to blend or switch between them.
+          </p>
+        </div>
 
         <div className="mt-4 rounded-2xl bg-card/60 p-4">
           <div className="mb-3 flex items-center justify-between">
@@ -349,28 +376,6 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             {!session.queue.length && <div className="py-6 text-center text-xs text-muted-foreground">Add tracks to the main Zuno queue.</div>}
           </div>
         </div>
-        <div className="mt-4 rounded-2xl bg-card/60 p-5">
-          <div className="mb-2 flex items-center justify-between">
-            <div className="text-xs font-bold tracking-widest">MIXER</div>
-            <div className="text-[10px] text-muted-foreground">A ← Crossfader → B</div>
-          </div>
-          <input
-            aria-label="Crossfader"
-            type="range"
-            min={0}
-            max={100}
-            value={crossfader}
-            onChange={(event) => applyCrossfader(Number(event.target.value))}
-            className="w-full accent-[var(--color-primary)]"
-          />
-          <div className="mt-1 flex justify-between text-[9px] font-bold text-muted-foreground">
-            <span>DECK A</span><span>CENTER MIX</span><span>DECK B</span>
-          </div>
-          <p className="mt-3 text-[10px] text-muted-foreground">
-            Both decks can play at the same time. Move the crossfader left/right to blend or switch between them.
-          </p>
-        </div>
-
         {showDeckPicker && (
           <div className="mt-4 rounded-2xl bg-card/60 p-4">
             <div className="mb-3 flex items-center justify-between">
