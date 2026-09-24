@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Track } from "../../datasource/types";
 import type { PlayerControllerActions } from "../../player/playerStore";
 import type { PlayerSession } from "../../player/PlayerController";
