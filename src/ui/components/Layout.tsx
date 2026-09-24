@@ -316,7 +316,7 @@ export function Layout({
                     "flex h-full min-h-0 min-w-0 gap-2 overflow-hidden p-2",
                     splitOrientation === "vertical" ? "flex-row" : "flex-col",
                   )}>
-                    <section className="min-h-0 min-w-0 flex-1 overflow-hidden rounded-xl">
+                    <section className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain rounded-xl">
                       {children}
                     </section>
                     <div
