@@ -4415,6 +4415,25 @@ fn native_audio_play_standby(
 }
 
 #[tauri::command]
+fn native_audio_pause_standby(
+    state: tauri::State<'_, audio::NativeAudio>,
+    track_id: String,
+) -> Result<bool, CommandError> {
+    audio::request(&state, |reply| audio::Command::PauseStandby { track_id, reply })
+        .map_err(cache_error)
+}
+
+#[tauri::command]
+fn native_audio_seek_standby(
+    state: tauri::State<'_, audio::NativeAudio>,
+    track_id: String,
+    position_sec: f64,
+) -> Result<bool, CommandError> {
+    audio::request(&state, |reply| audio::Command::SeekStandby { track_id, seconds: position_sec, reply })
+        .map_err(cache_error)
+}
+
+#[tauri::command]
 fn native_audio_set_deck_volumes(
     state: tauri::State<'_, audio::NativeAudio>,
     active_volume: f32,
@@ -5416,6 +5435,8 @@ pub fn run() {
             native_audio_set_rate,
             native_audio_transition,
             native_audio_play_standby,
+            native_audio_pause_standby,
+            native_audio_seek_standby,
             native_audio_set_deck_volumes,
             native_audio_has_standby,
             native_audio_drop_standby,
