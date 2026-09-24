@@ -793,6 +793,16 @@ export class AudioEngine {
     return rustAudio.playStandby(videoId, Math.max(0, Math.min(1, volume)));
   }
 
+  async pausePreloaded(videoId: string): Promise<boolean> {
+    if (!this.useRustAudio || !this.hasPreloaded(videoId)) return false;
+    return rustAudio.pauseStandby(videoId);
+  }
+
+  async seekPreloaded(videoId: string, seconds: number): Promise<boolean> {
+    if (!this.useRustAudio || !this.hasPreloaded(videoId)) return false;
+    return rustAudio.seekStandby(videoId, seconds);
+  }
+
   /** Sets the active and standby deck levels independently for the DJ crossfader. */
   async setDeckVolumes(activeVolume: number, standbyVolume: number): Promise<void> {
     if (!this.useRustAudio) return;
