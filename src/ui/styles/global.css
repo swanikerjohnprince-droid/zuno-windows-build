@@ -1,0 +1,614 @@
+/*
+ * Tailwind v4, full import including preflight — the CSS Modules are gone.
+ *
+ * docs/ is excluded from scanning: tauribg.txt and beUI.txt are reference dumps full of
+ * class names the app never uses, and Tailwind would emit utilities for all of them.
+ * (Excluding rather than `source(none)` + an explicit @source — the latter silently
+ * stops arbitrary variants like `[&_input]:…` from being extracted.)
+ */
+/*
+ * Inter, self-hosted via @fontsource-variable. Bundled rather than loaded from a CDN: this
+ * is an offline desktop app, and a webfont request that fails leaves the UI on a fallback
+ * face. Imported here rather than in the entry modules because main.tsx and mini.tsx both
+ * pull in this stylesheet, so one import covers both windows.
+ */
+@import "@fontsource-variable/inter";
+@import "tailwindcss";
+@source not "../../../docs";
+
+/*
+ * Design tokens consumed by the vendored beUI components.
+ * Neutral shadcn surfaces, with the app's #ff0033 kept as `primary` (accent only).
+ *
+ * The UI is borderless: surfaces are separated by background contrast, not outlines.
+ * `--color-border` / `--color-input` are kept only because beUI component internals
+ * reference them; no app component draws a border.
+ */
+@theme {
+  --color-background: oklch(0.145 0 0);
+  --color-foreground: oklch(0.985 0 0);
+
+  --color-card: oklch(0.285 0 0);
+  --color-card-foreground: oklch(0.985 0 0);
+  --color-popover: oklch(0.205 0 0);
+  --color-popover-foreground: oklch(0.985 0 0);
+
+  --color-muted: oklch(0.269 0 0);
+  --color-muted-foreground: oklch(0.708 0 0);
+
+  /* Brand accent — the one colour carried over from the old identity. */
+  --color-primary: #ff0033;
+  --color-primary-foreground: oklch(0.985 0 0);
+
+  --color-secondary: oklch(0.269 0 0);
+  --color-secondary-foreground: oklch(0.985 0 0);
+
+  --color-destructive: oklch(0.704 0.191 22.216);
+  --color-destructive-foreground: oklch(0.985 0 0);
+
+  --color-border: oklch(1 0 0 / 10%);
+  --color-input: oklch(1 0 0 / 15%);
+  --color-ring: #ff0033;
+ 
+}
+
+/*
+ * Strength of the ambient accent bloom behind the window (see StarField.tsx). It is a token
+ * rather than a fixed opacity because the same wash behaves completely differently per
+ * theme: over near-black it reads as a faint glow, over near-white as a pink stain.
+ */
+:root {
+  --ambient-bloom: 1;
+
+  /*
+   * The window's own edge. This window is transparent and its OS shadow is disabled, so a
+   * hairline is the only thing separating the app from whatever is behind it — without it
+   * the rounded corners read as a cut-out rather than a pane. Same treatment as the picks
+   * cards: a light inner ring plus a specular highlight along the top edge.
+   */
+  --window-edge: oklch(1 0 0 / 14%);
+  --window-edge-highlight: oklch(1 0 0 / 22%);
+}
+
+/*
+ * Light theme. The @theme block above is the dark default; this flips the same token
+ * names, so every component follows without knowing a theme exists.
+ *
+ * `--color-primary` stays #ff0033 in both — it is the brand accent, not a surface.
+ * Contrast is tuned for white text on primary in dark and near-black text elsewhere.
+ */
+html[data-theme="light"] {
+  /*
+   * The background is deliberately *below* pure white and cards sit at white, i.e. the
+   * inverse of the dark theme where cards are lighter than the background. This app is
+   * borderless — surfaces are told apart by contrast alone — so a white-on-white pairing
+   * (the obvious first choice) makes every card, popover and hover state disappear.
+   */
+  --color-background: oklch(0.954 0 0);
+  --color-foreground: oklch(0.205 0 0);
+
+  --color-card: oklch(1 0 0);
+  --color-card-foreground: oklch(0.205 0 0);
+  --color-popover: oklch(1 0 0);
+  --color-popover-foreground: oklch(0.205 0 0);
+
+  --color-muted: oklch(0.915 0 0);
+  /* 0.45 keeps secondary text at ~4.6:1 on the background — readable, still recessive. */
+  --color-muted-foreground: oklch(0.45 0 0);
+
+  --color-secondary: oklch(0.915 0 0);
+  --color-secondary-foreground: oklch(0.205 0 0);
+
+  --color-border: oklch(0 0 0 / 10%);
+  --color-input: oklch(0 0 0 / 14%);
+
+  /* The accent wash has to be far weaker here or the chrome looks tinted pink. */
+  --ambient-bloom: 0.3;
+
+  /* A white hairline vanishes on a light surface; the edge has to darken instead. */
+  --window-edge: oklch(0 0 0 / 14%);
+  --window-edge-highlight: oklch(1 0 0 / 60%);
+
+  color-scheme: light;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+/*
+ * Layout constants read from TSX (`h-[var(--titlebar-height)]`) rather than colours —
+ * every colour now comes from the @theme block above.
+ */
+:root {
+  --titlebar-height: 44px;
+  --sidebar-width: 220px;
+
+  /* macOS-style window rounding. The window itself is transparent; the app root paints
+     this radius, so the corners must stay unpainted all the way up the tree. */
+  --window-radius: 14px;
+  border-color: transparent;
+}
+
+/*
+ * No radius when the window fills the screen, or when the OS is drawing the frame —
+ * a rounded corner inside a squared-off native frame shows the desktop through the gap.
+ */
+html[data-window-maximized],
+html[data-native-window-controls],
+html[data-platform-linux] {
+  --window-radius: 0px;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  /* Transparent so the app root's rounded corners are actually cut out.
+     The mini-player window enforces the same with `!important` in mini.html. */
+  background: transparent;
+  color: var(--color-foreground);
+  font-family: "Inter Variable", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+    Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  /*
+   * `cv11` gives Inter the single-storey `l`/`g` that reads closer to a geometric UI face,
+   * and tabular numerals stop timers and durations from jittering as the digits change.
+   */
+  font-feature-settings: "cv11", "ss01";
+  font-optical-sizing: auto;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Anywhere a number counts up or down, the glyphs must not change width. */
+time,
+[data-tabular-numbers] {
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Heading defaults. Tailwind's preflight resets headings to inherit their size, and the
+ * old CSS Modules were what gave them hierarchy — without this every h1/h2/h3 in the app
+ * renders at body size. Utilities on an element still override these.
+ */
+@layer base {
+  /*
+   * Sized against a 16px body, the way Spotify's chrome is: page titles are genuinely large,
+   * section headers clearly outrank rows, and nothing in the reading column falls below
+   * 14px. The previous scale topped out at 24/16/14, which read as one flat grey mass once
+   * the body text around it was also 12-13px.
+   */
+  h1 {
+    font-size: 2rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1.15;
+  }
+  h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.25;
+  }
+  h3 {
+    font-size: 1.125rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    line-height: 1.3;
+  }
+}
+
+/* Selection picks up the brand accent instead of the browser's default blue. */
+::selection {
+  background: color-mix(in oklab, var(--color-primary) 30%, transparent);
+  color: var(--color-foreground);
+}
+
+/* Native-feeling desktop defaults */
+body {
+  overflow: hidden;
+}
+button{
+  cursor: pointer;
+}
+
+/* Hide browser scrollbars; we'll do custom later */
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* Disable the native browser context menu */
+body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* No focus rings on mouse click */
+*:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/*
+ * Fallback focus ring for anything without an explicit `focus-visible:ring-*`.
+ * Uses the theme ring rather than hardcoded white so it matches the accent.
+ */
+*:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+}
+
+/*
+ * Text fields never draw their own ring: every input in the app sits inside a
+ * composed field (search pill, settings row) whose wrapper already reacts to
+ * :focus-within. A second ring on the inner input reads as a box-in-a-box.
+ */
+input:focus,
+input:focus-visible,
+textarea:focus,
+textarea:focus-visible {
+  outline: none;
+}
+
+/*
+ * Potato PC mode: the opaque palette.
+ *
+ * This block used to also carry a wall of `!important` resets — animation, transition,
+ * shadow, will-change, backdrop-filter — which is exactly what the `data-fx-off` switches
+ * below now do, one category at a time. Two mechanisms killing the same properties meant the
+ * blunt one silently won: with Potato PC on, turning an individual effect back on to see what
+ * it cost changed nothing, and the switch looked broken.
+ *
+ * So Potato PC is now the palette plus `setAllEffectsDisabled(true)` (see renderEffects.ts),
+ * and there is one mechanism. What remains here genuinely cannot live in the switches: the
+ * default surfaces are translucent and lean on a backdrop-filter that the `backdrop` switch
+ * removes, so without opaque replacements the mode's own surfaces stop being readable.
+ */
+html[data-paper-pc] {
+  --color-background: #070707;
+  --color-card: #181818;
+  --color-popover: #202020;
+  --color-muted: #262626;
+  --color-border: #2c2c2c;
+}
+
+/*
+ * The OS-level setting. Motion/React reads it (every `useReducedMotion` call goes straight to
+ * this media query), but nothing was reading it for plain CSS — so a machine with Reduce
+ * Motion on still got the spinner, the bouncing loader, the visualiser bars, the 44s lyrics
+ * drift, the marquee and every hover transition in the app.
+ *
+ * Near-zero durations rather than `none`: an animation that never starts also never fires
+ * `animationend`, and killing the event outright is a class of bug that only shows up in
+ * whatever library grows a dependency on it later. `alternate` is reset because a reversing
+ * animation with one iteration settles on its *start* frame, which for `.music-bar` and
+ * `lyrics-drift` is the wrong end.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    animation-direction: normal !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+    will-change: auto !important;
+  }
+
+  /*
+   * The one animation the rule above cannot be blunt with. Every other keyframe in the app
+   * ends where it starts, so collapsing the duration parks it on a frame that looks like the
+   * resting state; the marquee ends a full track-width to the left, which under that rule
+   * would snap the title clean out of its column and show nothing at all.
+   */
+  .animate-marquee,
+  .animate-marquee-vertical {
+    animation: none !important;
+  }
+}
+
+/*
+ * WebKitGTK composites a backdrop-filter badly enough that it is never worth having there,
+ * regardless of any setting. This is the platform, not a preference — which is why it stayed
+ * when the Potato PC half of this rule moved to the `backdrop` switch.
+ */
+html[data-platform-linux] *,
+html[data-platform-linux] *::before,
+html[data-platform-linux] *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/*
+ * Per-effect kill switches (see settings/renderEffects.ts).
+ *
+ * One attribute holding a space-separated list, matched with `~=`, rather than one attribute
+ * per effect: eleven `toggleAttribute` calls and eleven attributes on <html> to express one
+ * list. Everything here is `!important` because it is overriding utilities, and blunt on
+ * purpose — this is a debug instrument, not a theme.
+ */
+html[data-fx-off~="transitions"] *,
+html[data-fx-off~="transitions"] *::before,
+html[data-fx-off~="transitions"] *::after {
+  transition: none !important;
+  /* Smooth scrolling is a transition of scroll position, and the only other place it was
+     turned off was the Potato PC block this switch replaced. */
+  scroll-behavior: auto !important;
+}
+
+html[data-fx-off~="animations"] *,
+html[data-fx-off~="animations"] *::before,
+html[data-fx-off~="animations"] *::after {
+  animation: none !important;
+}
+
+html[data-fx-off~="backdrop"] *,
+html[data-fx-off~="backdrop"] *::before,
+html[data-fx-off~="backdrop"] *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+html[data-fx-off~="filters"] *,
+html[data-fx-off~="filters"] *::before,
+html[data-fx-off~="filters"] *::after {
+  filter: none !important;
+}
+
+html[data-fx-off~="shadows"] *,
+html[data-fx-off~="shadows"] *::before,
+html[data-fx-off~="shadows"] *::after {
+  box-shadow: none !important;
+  text-shadow: none !important;
+}
+
+html[data-fx-off~="will-change"] *,
+html[data-fx-off~="will-change"] *::before,
+html[data-fx-off~="will-change"] *::after {
+  will-change: auto !important;
+}
+
+/* Whole layers, not properties — these are marked `data-fx` at their root in TSX. */
+html[data-fx-off~="ambient"] [data-fx~="ambient"] {
+  display: none !important;
+}
+
+html[data-fx-off~="lyrics-drift"] .lyrics-drift {
+  animation: none !important;
+  will-change: auto !important;
+}
+
+html[data-fx-off~="visualizer"] .music,
+html[data-fx-off~="visualizer"] .audio-loader,
+html[data-fx-off~="visualizer"] .spinner-steps {
+  display: none !important;
+}
+
+html[data-fx-off~="marquee"] .animate-marquee,
+html[data-fx-off~="marquee"] .animate-marquee-vertical {
+  animation: none !important;
+}
+
+.audio-loader {
+  display: flex;
+  gap: 3px;
+  height: 40px;
+  align-items: flex-end;
+}
+
+.audio-loader span {
+  width: 4px;
+  height: 20px;
+  background: linear-gradient(
+    34deg,
+    rgb(240, 81, 72) 41%,
+    rgb(245, 200, 149) 100%
+  );
+  border-radius: 4px;
+  transform-origin: bottom center;
+  animation: bounce 0.7s infinite ease-in-out;
+}
+
+.audio-loader span:nth-child(1) {
+  animation-delay: 0s;
+  height: 20px;
+}
+
+.audio-loader span:nth-child(2) {
+  animation-delay: 0.1s;
+  height: 30px;
+}
+
+.audio-loader span:nth-child(3) {
+  animation-delay: 0.2s;
+  height: 45px;
+}
+
+.audio-loader span:nth-child(4) {
+  animation-delay: 0.1s;
+  height: 18px;
+}
+
+.audio-loader span:nth-child(5) {
+  animation-delay: 0s;
+  height: 10px;
+}
+
+@keyframes bounce {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@theme {
+  --animate-spinner-steps: spinner-steps 1s steps(8) infinite;
+
+  @keyframes spinner-steps {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
+  }
+}
+
+@keyframes spinner-steps {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/*
+ * Marquee, for titles too long for their column (TrackInfo, MiniPlayer).
+ *
+ * These keyframes were missing entirely. Tailwind v4 resolves `animate-marquee` against a
+ * `--animate-marquee` theme key, and with no key there is no utility — the class name landed
+ * in the markup and the compiler emitted nothing, so the marquee has never once scrolled. The
+ * component's own duration and direction are set inline, and inline longhand outranks the
+ * shorthand here, so this only has to supply the timeline.
+ *
+ * `--gap` comes from the wrapper: the track is duplicated, and the second copy has to arrive
+ * exactly where the first left, gap included, or the loop visibly stutters once per cycle.
+ */
+@theme {
+  --animate-marquee: marquee 30s linear infinite;
+  --animate-marquee-vertical: marquee-vertical 30s linear infinite;
+}
+
+@keyframes marquee {
+  to {
+    transform: translateX(calc(-100% - var(--gap, 1rem)));
+  }
+}
+
+@keyframes marquee-vertical {
+  to {
+    transform: translateY(calc(-100% - var(--gap, 1rem)));
+  }
+}
+
+.spinner-steps {
+  display: inline-block;
+  animation: spinner-steps var(--spinner-duration, 0.8s)
+    steps(12, end) infinite;
+  transform-origin: center;
+  will-change: transform;
+}
+
+/*
+ * Lyrics: the sung portion of the active line, wiped left to right.
+ *
+ * `--sweep` is written straight onto the element by the animation frame that tracks
+ * playback — a percentage in React state would re-render the whole column sixty times a
+ * second to move one gradient stop. The two stops are offset so the edge is a soft ramp
+ * rather than a hard cut, which at display sizes reads as light moving across the words
+ * instead of a progress bar clipped to text.
+ */
+.lyric-sweep {
+  background-image: linear-gradient(
+    90deg,
+    var(--color-foreground) calc(var(--sweep, 0%) - 4%),
+    color-mix(in oklab, var(--color-foreground) 28%, transparent) calc(var(--sweep, 0%) + 7%)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+/* For RTL Arabic language */
+[dir="rtl"] .lyric-sweep,
+.lyric-sweep[dir="rtl"],
+.lyric-sweep:dir(rtl) {
+  background-image: linear-gradient(
+    270deg,
+    var(--color-foreground) calc(var(--sweep, 0%) - 4%),
+    color-mix(in oklab, var(--color-foreground) 28%, transparent) calc(var(--sweep, 0%) + 7%)
+  );
+}
+
+/*
+ * Slow parallax on the blurred cover behind the lyrics. Long and asymmetric on purpose: at
+ * 44s nothing ever appears to move while you read, but the backdrop is never twice the same,
+ * which is what keeps a static page from feeling like a screenshot.
+ */
+@keyframes lyrics-drift {
+  0% {
+    transform: scale(1.25) translate3d(-2%, -1%, 0);
+  }
+  100% {
+    transform: scale(1.4) translate3d(2%, 2%, 0);
+  }
+}
+
+.lyrics-drift {
+  animation: lyrics-drift 44s ease-in-out infinite alternate;
+  will-change: transform;
+}
+
+
+/*
+ * Music visualiser bars.
+ *
+ * `@keyframes` lives here, at the top level, and not inside `.music` where it was: CSS
+ * nesting accepts nested style rules and conditional at-rules, but not `@keyframes`, so the
+ * compiler dropped it without a word. The bars kept their `animation: play-music` reference
+ * to an animation that no longer existed, which left them with no height at all — the only
+ * height they ever had came from those keyframes — so every bar rendered 0px tall.
+ *
+ * Animating `transform` rather than `height`: fifteen bars resizing on every frame is
+ * fifteen layout passes, where a scale is composited.
+ */
+@keyframes play-music {
+  0%,
+  100% {
+    transform: scaleY(0.18);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.music {
+  /* Overridable per usage — this sits in a settings header, not on a hero. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--music-gap, 3px);
+  width: var(--music-width, 132px);
+  height: var(--music-height, 34px);
+}
+
+/*
+ * Shape and timing only. Each bar's colour and animation-delay are set inline by
+ * MusicVisualizer, because both are derived from the bar's distance from the centre — a
+ * calculation the component already does, and one that fifteen hand-written `:nth-child`
+ * rules could only restate by hand and get out of step with the bar count.
+ */
+.music-bar {
+  flex: 1 1 0;
+  height: 100%;
+  border-radius: 9999px;
+  /*
+   * The resting scale is set here as well as in the keyframes. Paper-PC mode kills every
+   * animation with `animation: none !important`, and a bar whose height depends entirely on
+   * its animation collapses to nothing under it — the same failure this block already had.
+   */
+  transform: scaleY(0.18);
+  animation: play-music 2s ease-in-out infinite;
+}
+
+.mySong { border-radius: 10px; }
