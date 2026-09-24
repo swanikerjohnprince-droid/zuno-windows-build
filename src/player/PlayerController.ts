@@ -1494,6 +1494,10 @@ export class PlayerController {
     await this.audioEngine.setDeckVolumes(activeVolume, standbyVolume);
   }
 
+  getCuedDuration(track: Track): number {
+    return this.audioEngine.getPreloadedDuration(track.id) || track.durationSec || 0;
+  }
+
   async pauseCuedTrack(track: Track): Promise<boolean> {
     return this.audioEngine.pausePreloaded(track.id);
   }
