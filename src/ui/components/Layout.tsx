@@ -24,6 +24,9 @@ interface LayoutProps {
   showTransientScrollbar?: boolean;
   rightPanel?: ReactNode;
   rightPanelWidth?: number;
+  splitMode?: boolean;
+  splitOrientation?: "vertical" | "horizontal";
+  splitPanel?: ReactNode;
   onRightPanelWidthChange?: (width: number) => void;
   /**
    * Identifies which page is currently in the scroll root — the same string `App` keys the page
@@ -56,6 +59,9 @@ export function Layout({
   showTransientScrollbar = false,
   rightPanel,
   rightPanelWidth = 340,
+  splitMode = false,
+  splitOrientation = "vertical",
+  splitPanel,
   scrollKey,
 }: LayoutProps) {
   const ambientArtwork = useAmbientArtwork();
@@ -305,7 +311,26 @@ export function Layout({
                 )}
                 data-page-scroll-root
               >
-                {children}
+                {splitMode ? (
+                  <div className={cn(
+                    "flex h-full min-h-0 min-w-0 gap-2 overflow-hidden p-2",
+                    splitOrientation === "vertical" ? "flex-row" : "flex-col",
+                  )}>
+                    <section className="min-h-0 min-w-0 flex-1 overflow-hidden rounded-xl">
+                      {children}
+                    </section>
+                    <div
+                      aria-hidden="true"
+                      className={cn(
+                        "shrink-0 bg-white/10",
+                        splitOrientation === "vertical" ? "w-px" : "h-px",
+                      )}
+                    />
+                    <section className="min-h-0 min-w-0 flex-1 overflow-hidden rounded-xl bg-card/30">
+                      {splitPanel}
+                    </section>
+                  </div>
+                ) : children}
               </div>
               {showTransientScrollbar && scrollbarState.canScroll && (
                 <div
