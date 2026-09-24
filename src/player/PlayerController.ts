@@ -351,8 +351,13 @@ export class PlayerController {
     this.syncTransitionTicker();
   }
 
-  async loadTrack(track: Track): Promise<void> {
-    logInternalInfo("PlayerController.loadTrack start", { trackId: track.id });
+  async loadTrack(track: Track, preserveDjDeck = false): Promise<void> {
+    logInternalInfo("PlayerController.loadTrack start", { trackId: track.id, preserveDjDeck });
+    // A normal Zuno load owns the whole playback surface and must not leave a DJ standby
+    // deck sounding underneath it. DJ Mode explicitly opts out so Deck A can coexist with Deck B.
+    if (!preserveDjDeck) {
+      this.audioEngine.stop();
+    }
     this.pendingSeekTime = null;
     this.setState({ status: "loading", error: null });
     try {
