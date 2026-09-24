@@ -418,3 +418,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             )}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
