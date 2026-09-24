@@ -17,12 +17,12 @@ function formatTime(seconds: number) {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
 }
 
-function buildWave(seed: string, count = 180) {
+function buildWave(seed: string, count = 180, phase = 0) {
   let n = 0;
   for (let i = 0; i < seed.length; i++) n = (n * 31 + seed.charCodeAt(i)) >>> 0;
   return Array.from({ length: count }, (_, i) => {
     n = (1664525 * n + 1013904223) >>> 0;
-    const pulse = Math.abs(Math.sin(i * 0.19 + (n % 100) / 30));
+    const pulse = Math.abs(Math.sin(i * 0.19 + (n % 100) / 30 + phase));
     return 0.18 + ((n % 100) / 100) * 0.48 + pulse * 0.28;
   });
 }
@@ -52,7 +52,7 @@ function Deck({
   onLoad: () => void;
   hotCues: (number | null)[];
 }) {
-  const waveform = useMemo(() => buildWave(`${track?.id ?? side}-${side}`), [track?.id, side]);
+  const waveform = useMemo(() => buildWave(`${track?.id ?? side}-${side}`, 180, position * 3.2), [track?.id, side, Math.floor(position * 10)]);
   const pct = duration ? Math.min(100, (position / duration) * 100) : 0;
 
   return (
@@ -225,11 +225,19 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
 
   const playB = async () => {
     if (!deckB) return;
+    if (deckBPlaying) {
+      const paused = await playerController.pauseCuedTrack(deckB);
+      if (paused) {
+        setDeckBPlaying(false);
+        setDeckBStartedAt(null);
+      }
+      return;
+    }
     const normalized = crossfader / 100;
     const started = await playerController.playCuedTrack(deckB, Math.sin(normalized * Math.PI / 2));
     if (started) {
       setDeckBPlaying(true);
-      setDeckBStartedAt(Date.now());
+      setDeckBStartedAt(Date.now() - deckBPosition * 1000);
     }
   };
 
@@ -300,6 +308,8 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             onSeek={(value) => {
               setDeckBPosition(value);
               if (deckB) {
+                void playerController.seekCuedTrack(deckB, value);
+                if (deckBPlaying) setDeckBStartedAt(Date.now() - value * 1000);
                 void playerController.setDjDeckVolumes(
                   Math.cos((crossfader / 100) * Math.PI / 2),
                   Math.sin((crossfader / 100) * Math.PI / 2),
@@ -312,6 +322,33 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
           />
         </div>
 
+
+        <div className="mt-4 rounded-2xl bg-card/60 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <div className="text-xs font-bold tracking-widest">DECK A QUEUE</div>
+              <div className="text-[10px] text-muted-foreground">Your main Zuno queue stays here while DJ Mode is open.</div>
+            </div>
+            <span className="rounded-full bg-muted px-2 py-1 text-[9px] font-bold text-muted-foreground">{session.queue.length} TRACKS</span>
+          </div>
+          <div className="max-h-56 overflow-auto pr-1">
+            {session.queue.map((track, index) => (
+              <button key={track.id} type="button"
+                onClick={() => { void playerController.loadTrack(track); setDeckAPosition(0); }}
+                className={cn("flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left hover:bg-white/5", deckA?.id === track.id && "bg-primary/10 ring-1 ring-primary/20")}
+              >
+                <span className="w-5 text-center text-[10px] font-bold text-muted-foreground">{index + 1}</span>
+                <TrackArtwork artworkUrl={track.artworkUrl} className="size-9 rounded-lg" size={48} iconSize={15} />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-medium">{track.title}</span>
+                  <span className="block truncate text-[10px] text-muted-foreground">{track.artist}</span>
+                </span>
+                <span className="text-[9px] font-bold text-muted-foreground">{deckA?.id === track.id ? "PLAYING" : "LOAD"}</span>
+              </button>
+            ))}
+            {!session.queue.length && <div className="py-6 text-center text-xs text-muted-foreground">Add tracks to the main Zuno queue.</div>}
+          </div>
+        </div>
         <div className="mt-4 rounded-2xl bg-card/60 p-5">
           <div className="mb-2 flex items-center justify-between">
             <div className="text-xs font-bold tracking-widest">MIXER</div>
