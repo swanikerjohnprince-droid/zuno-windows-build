@@ -432,6 +432,21 @@ export class AudioEngine {
     this.onEnded?.();
   }
 
+  /** Starts the active DJ deck without claiming global single-player ownership. */
+  async playDjActive(): Promise<boolean> {
+    if (!this.useRustAudio || !this.rustTrackId) return false;
+    await rustAudio.setVolume(this.volume, this.muted);
+    await rustAudio.play();
+    return true;
+  }
+
+  /** Pauses the active DJ deck without affecting the standby deck. */
+  async pauseDjActive(): Promise<boolean> {
+    if (!this.useRustAudio || !this.rustTrackId) return false;
+    await rustAudio.pause();
+    return true;
+  }
+
   async play(): Promise<boolean> {
     const claimId = this.claimPlayback();
     if (this.rustTrackId) {
