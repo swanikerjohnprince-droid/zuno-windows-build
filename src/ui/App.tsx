@@ -2076,7 +2076,7 @@ useEffect(() => {
             onDismiss={canNavigateBack ? handleNavigateBack : undefined}
           >
           <Suspense fallback={<div className="min-h-0 flex-1" />}>
-          {isDJMode ? (
+          {isDJMode && playerSession ? (
             <DJMode
               session={playerSession}
               playerController={playerController}
