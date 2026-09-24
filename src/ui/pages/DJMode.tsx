@@ -222,10 +222,10 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
 
   const playA = async () => {
     if (session.status === "playing") {
-      await playerController.pause();
+      await playerController.pauseDjActive();
       return;
     }
-    await playerController.play();
+    await playerController.playDjActive();
     void playerController.setDjDeckVolumes(
       Math.cos((crossfader / 100) * Math.PI / 2),
       Math.sin((crossfader / 100) * Math.PI / 2),
