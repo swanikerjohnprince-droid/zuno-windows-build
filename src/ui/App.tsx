@@ -2048,10 +2048,18 @@ useEffect(() => {
           onNavigateBack={handleNavigateBack}
           onNavigateForward={handleNavigateForward}
           fullBleedContent={playerUIState.isLyricsOpen || isDJMode || isSplitMode}
-          hideSidebar={playerUIState.isLyricsFullscreen || isDJMode || isSplitMode}
+          hideSidebar={playerUIState.isLyricsFullscreen || isDJMode}
           splitMode={isSplitMode}
           splitOrientation={splitOrientation}
-          splitPanel={<QueuePanel onClose={() => setIsSplitMode(false)} />}
+          splitPanel={playerSession ? (
+            <DJMode
+              session={playerSession}
+              playerController={playerController}
+              onClose={() => setIsSplitMode(false)}
+            />
+          ) : (
+            <div className="grid h-full place-items-center text-sm text-muted-foreground">Loading DJ…</div>
+          )}
           showTransientScrollbar={
             !playerUIState.isLyricsOpen
             && (activeTab?.view === "playlist" || activeTab?.view === "album")
