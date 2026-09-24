@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Track } from "../../datasource/types";
-import type { PlayerControllerActions, PlayerSession } from "../../player/playerStore";
+import type { PlayerControllerActions } from "../../player/playerStore";
+import type { PlayerSession } from "../../player/PlayerController";
 import { TrackArtwork } from "../components/TrackArtwork";
 import { cn } from "@/lib/utils";
 import { PlayIcon, PauseIcon, SkipNextIcon, MusicNoteIcon } from "@/ui/icons";
