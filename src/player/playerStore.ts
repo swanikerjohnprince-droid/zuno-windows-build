@@ -91,6 +91,8 @@ type PlayerControllerMethod =
   | "generateQueueAfter"
   | "cueTrack"
   | "playCuedTrack"
+  | "pauseCuedTrack"
+  | "seekCuedTrack"
   | "setDjDeckVolumes"
   | "mixToTrack";
 
@@ -180,6 +182,10 @@ class ActivePlayerController implements PlayerControllerActions {
   cueTrack = (track: Track) => tabManager.getActivePlayer().cueTrack(track);
   playCuedTrack = (track: Track, volume = 0) =>
     tabManager.getActivePlayer().playCuedTrack(track, volume);
+  pauseCuedTrack = (track: Track) =>
+    tabManager.getActivePlayer().pauseCuedTrack(track);
+  seekCuedTrack = (track: Track, seconds: number) =>
+    tabManager.getActivePlayer().seekCuedTrack(track, seconds);
   setDjDeckVolumes = (activeVolume: number, standbyVolume: number) =>
     tabManager.getActivePlayer().setDjDeckVolumes(activeVolume, standbyVolume);
   mixToTrack = (track: Track, fadeMs = 4000) => tabManager.getActivePlayer().mixToTrack(track, fadeMs);
