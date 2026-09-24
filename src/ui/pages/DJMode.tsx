@@ -364,7 +364,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
           <div className="max-h-56 overflow-auto pr-1">
             {session.queue.map((track, index) => (
               <button key={track.id} type="button"
-                onClick={() => { void playerController.loadTrack(track); setDeckAPosition(0); }}
+                onClick={() => { void playerController.loadTrack(track, true); setDeckAPosition(0); }}
                 className={cn("flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left hover:bg-white/5", deckA?.id === track.id && "bg-primary/10 ring-1 ring-primary/20")}
               >
                 <span className="w-5 text-center text-[10px] font-bold text-muted-foreground">{index + 1}</span>
@@ -403,7 +403,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
                   type="button"
                   onClick={() => {
                     if (showDeckPicker === "A") {
-                      void playerController.loadTrack(track);
+                      void playerController.loadTrack(track, true);
                       setDeckAPosition(0);
                     } else {
                       selectDeckB(track);
