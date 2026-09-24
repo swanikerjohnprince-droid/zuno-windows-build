@@ -37,6 +37,7 @@ function Deck({
   onCue,
   onSeek,
   onHotCue,
+  onLoad,
   hotCues,
 }: {
   side: "A" | "B";
@@ -48,6 +49,7 @@ function Deck({
   onCue: () => void;
   onSeek: (value: number) => void;
   onHotCue: (index: number) => void;
+  onLoad: () => void;
   hotCues: (number | null)[];
 }) {
   const waveform = useMemo(() => buildWave(`${track?.id ?? side}-${side}`), [track?.id, side]);
@@ -62,6 +64,9 @@ function Deck({
           <div className="truncate text-xs text-muted-foreground">{track?.artist ?? "Choose a song from the library"}</div>
         </div>
         <div className="flex items-center gap-2 text-[10px] font-semibold text-muted-foreground">
+          <button type="button" onClick={onLoad} className="rounded-lg bg-primary/15 px-2 py-1 font-bold text-primary hover:bg-primary/25">
+            LOAD
+          </button>
           <span className="rounded-full bg-muted px-2 py-1">128 BPM</span>
           <span className="rounded-full bg-muted px-2 py-1">8A</span>
         </div>
@@ -127,12 +132,27 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   const [deckBPlaying, setDeckBPlaying] = useState(false);
   const [deckBPosition, setDeckBPosition] = useState(0);
   const [deckBStartedAt, setDeckBStartedAt] = useState<number | null>(null);
+  const [deckAPosition, setDeckAPosition] = useState(0);
   const [hotCuesA, setHotCuesA] = useState<(number | null)[]>([null, null, null, null]);
   const [hotCuesB, setHotCuesB] = useState<(number | null)[]>([null, null, null, null]);
+  const [showDeckPicker, setShowDeckPicker] = useState<"A" | "B" | null>(null);
 
   const deckA = session.currentTrack;
   const durationA = deckA?.durationSec ?? playerController.getDuration();
   const durationB = deckB?.durationSec ?? 0;
+
+  // The player store intentionally does not emit on every audio sample, so the DJ surface
+  // keeps its own lightweight visual clock while the real audio engine remains the source of truth.
+  useEffect(() => {
+    if (session.status !== "playing") {
+      setDeckAPosition(session.positionSec);
+      return;
+    }
+    const tick = () => setDeckAPosition(Math.max(0, playerController.getCurrentTime()));
+    tick();
+    const timer = window.setInterval(tick, 50);
+    return () => window.clearInterval(timer);
+  }, [session.status, session.positionSec, playerController, deckA?.id]);
 
   // Keep Deck A tied to the real player session. This is deliberately derived from session
   // rather than copied into local state, so loading a song anywhere in Zuno immediately updates
@@ -192,6 +212,10 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   };
 
   const playA = async () => {
+    if (session.status === "playing") {
+      await playerController.pause();
+      return;
+    }
     await playerController.play();
     void playerController.setDjDeckVolumes(
       Math.cos((crossfader / 100) * Math.PI / 2),
@@ -253,13 +277,14 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
           <Deck
             side="A"
             track={deckA}
-            position={session.positionSec}
+            position={deckAPosition}
             duration={durationA}
             playing={session.status === "playing"}
             onPlay={() => void playA()}
             onCue={() => void playerController.seekTo(hotCuesA[0] ?? 0)}
             onSeek={(value) => void playerController.seekTo(value)}
             onHotCue={(i) => setCue("A", i)}
+            onLoad={() => setShowDeckPicker("A")}
             hotCues={hotCuesA}
           />
           <Deck
@@ -272,8 +297,17 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             onCue={() => {
               if (deckB) void playerController.cueTrack(deckB);
             }}
-            onSeek={() => {}}
+            onSeek={(value) => {
+              setDeckBPosition(value);
+              if (deckB) {
+                void playerController.setDjDeckVolumes(
+                  Math.cos((crossfader / 100) * Math.PI / 2),
+                  Math.sin((crossfader / 100) * Math.PI / 2),
+                );
+              }
+            }}
             onHotCue={(i) => setCue("B", i)}
+            onLoad={() => setShowDeckPicker("B")}
             hotCues={hotCuesB}
           />
         </div>
@@ -300,9 +334,64 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
           </p>
         </div>
 
+        {showDeckPicker && (
+          <div className="mt-4 rounded-2xl bg-card/60 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <div className="text-xs font-bold tracking-widest">LOAD ON DECK {showDeckPicker}</div>
+                <div className="text-[10px] text-muted-foreground">
+                  {showDeckPicker === "A" ? "Load a track as the active deck" : "Choose a track to prepare"}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDeckPicker(null)}
+                className="rounded-lg bg-white/5 px-3 py-1 text-[10px] hover:bg-white/10"
+              >
+                CLOSE
+              </button>
+            </div>
+            <div className="grid gap-1">
+              {session.queue.map((track) => (
+                <button
+                  key={track.id}
+                  type="button"
+                  onClick={() => {
+                    if (showDeckPicker === "A") {
+                      void playerController.loadTrack(track);
+                      setDeckAPosition(0);
+                    } else {
+                      selectDeckB(track);
+                    }
+                    setShowDeckPicker(null);
+                  }}
+                  className={cn(
+                    "flex items-center gap-3 rounded-xl px-3 py-2 text-left hover:bg-white/5",
+                    ((showDeckPicker === "A" ? deckA?.id : deckB?.id) === track.id) && "bg-primary/10",
+                  )}
+                >
+                  <TrackArtwork artworkUrl={track.artworkUrl} className="size-9 rounded-lg" size={48} iconSize={15} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-medium">{track.title}</span>
+                    <span className="block truncate text-[10px] text-muted-foreground">{track.artist}</span>
+                  </span>
+                  <span className="text-[9px] font-bold text-muted-foreground">
+                    {showDeckPicker === "A" && deckA?.id === track.id ? "ACTIVE" : showDeckPicker === "B" && deckB?.id === track.id ? "CUED" : "LOAD"}
+                  </span>
+                </button>
+              ))}
+              {!session.queue.length && (
+                <div className="py-6 text-center text-xs text-muted-foreground">
+                  Add tracks to the main Zuno queue first.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="mt-4 rounded-2xl bg-card/60 p-4">
           <div className="mb-3 flex items-center justify-between">
-            <div className="text-xs font-bold tracking-widest">LOAD ON DECK B</div>
+            <div className="text-xs font-bold tracking-widest">DECK B QUICK LOAD</div>
             <div className="text-[10px] text-muted-foreground">Choose a track to prepare</div>
           </div>
           <div className="grid gap-1">
@@ -329,7 +418,3 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             )}
           </div>
         </div>
-      </div>
-    </div>
-  );
-}
