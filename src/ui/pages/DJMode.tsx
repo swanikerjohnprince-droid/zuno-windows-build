@@ -52,7 +52,10 @@ function Deck({
   onLoad: () => void;
   hotCues: (number | null)[];
 }) {
-  const waveform = useMemo(\n    () => buildWave(`${track?.id ?? side}-${side}`, 180, playing ? position * 3.2 : 0),\n    [track?.id, side, playing, Math.floor(position * 10)],\n  );
+  const waveform = useMemo(
+    () => buildWave(`${track?.id ?? side}-${side}`, 180, playing ? position * 3.2 : 0),
+    [track?.id, side, playing, Math.floor(position * 10)],
+  );
   const pct = duration ? Math.min(100, (position / duration) * 100) : 0;
 
   return (
