@@ -100,8 +100,10 @@ type PlayerControllerMethod =
 export type PlayerControllerActions = Pick<PlayerController, PlayerControllerMethod>;
 
 class ActivePlayerController implements PlayerControllerActions {
-  loadTrack = async (track: Parameters<PlayerController["loadTrack"]>[0]) =>
-    (await tabManager.claimFocusedPlayer()).loadTrack(track);
+  loadTrack = async (
+    track: Parameters<PlayerController["loadTrack"]>[0],
+    preserveDjDeck?: Parameters<PlayerController["loadTrack"]>[1],
+  ) => (await tabManager.claimFocusedPlayer()).loadTrack(track, preserveDjDeck);
   playTrackById = async (
     videoId: string,
     playbackQueue?: Parameters<PlayerController["playTrackById"]>[1],
