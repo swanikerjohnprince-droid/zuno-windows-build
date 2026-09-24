@@ -265,7 +265,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   const nextTracks = session.queue.filter((track) => track.id !== deckA?.id);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl bg-[#0b0b0d] text-foreground">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl bg-background text-foreground">
       <header className="flex shrink-0 items-center justify-between border-b border-white/5 px-5 py-3">
         <div>
           <div className="text-[10px] font-bold tracking-[0.28em] text-primary">ZUNO DJ</div>
