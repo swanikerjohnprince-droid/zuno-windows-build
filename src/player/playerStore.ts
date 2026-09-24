@@ -90,6 +90,8 @@ type PlayerControllerMethod =
   | "setStopAfterQueueIndex"
   | "generateQueueAfter"
   | "cueTrack"
+  | "playCuedTrack"
+  | "setDjDeckVolumes"
   | "mixToTrack";
 
 export type PlayerControllerActions = Pick<PlayerController, PlayerControllerMethod>;
