@@ -787,6 +787,21 @@ export class AudioEngine {
     logInternalInfo("AudioEngine rust preloaded", { trackId });
   }
 
+  /** Starts the currently preloaded standby deck without swapping active-deck ownership. */
+  async playPreloaded(videoId: string, volume: number): Promise<boolean> {
+    if (!this.useRustAudio || !this.hasPreloaded(videoId)) return false;
+    return rustAudio.playStandby(videoId, Math.max(0, Math.min(1, volume)));
+  }
+
+  /** Sets the active and standby deck levels independently for the DJ crossfader. */
+  async setDeckVolumes(activeVolume: number, standbyVolume: number): Promise<void> {
+    if (!this.useRustAudio) return;
+    await rustAudio.setDeckVolumes(
+      Math.max(0, Math.min(1, activeVolume)),
+      Math.max(0, Math.min(1, standbyVolume)),
+    );
+  }
+
   /** Whether a transition to `videoId` can skip loading entirely. */
   hasPreloaded(videoId: string): boolean {
     if (this.useRustAudio) return this.rustStandbyTrackId === videoId;
