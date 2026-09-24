@@ -142,6 +142,14 @@ export function transition(trackId: string, fadeMs: number): Promise<boolean> {
   return invoke<boolean>("native_audio_transition", { trackId, fadeMs });
 }
 
+export function playStandby(trackId: string, volume: number): Promise<boolean> {
+  return invoke<boolean>("native_audio_play_standby", { trackId, volume });
+}
+
+export function setDeckVolumes(activeVolume: number, standbyVolume: number): Promise<void> {
+  return invoke("native_audio_set_deck_volumes", { activeVolume, standbyVolume });
+}
+
 export function hasStandby(trackId: string): Promise<boolean> {
   return invoke<boolean>("native_audio_has_standby", { trackId });
 }
