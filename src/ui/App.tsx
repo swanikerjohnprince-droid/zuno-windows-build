@@ -306,6 +306,8 @@ export default function App() {
   const [releaseNoteVersion, setReleaseNoteVersion] = useState<string | null>(null);
   const playerUIState = usePlayerUIState();
   const [isDJMode, setIsDJMode] = useState(false);
+  const [isSplitMode, setIsSplitMode] = useState(false);
+  const [splitOrientation, setSplitOrientation] = useState<"vertical" | "horizontal">("vertical");
   const miniPlayerEnabled = useMiniPlayerEnabled();
   const miniPlayerWindowLive = useMiniPlayerWindowLive();
   const keyboardShortcuts = useKeyboardShortcuts();
@@ -2020,6 +2022,14 @@ useEffect(() => {
         onOpenDownloads={() => handleOpenBrowse("downloads")}
         onToggleDJMode={() => setIsDJMode((open) => !open)}
         isDJMode={isDJMode}
+        isSplitMode={isSplitMode}
+        splitOrientation={splitOrientation}
+        onToggleSplitMode={() => setIsSplitMode((open) => !open)}
+        onToggleSplitOrientation={() =>
+          setSplitOrientation((orientation) =>
+            orientation === "vertical" ? "horizontal" : "vertical",
+          )
+        }
         onboardingFirstTabId={onboardingStep ? onboardingFirstTabId : undefined}
       />
       )}
@@ -2037,8 +2047,11 @@ useEffect(() => {
           canGoForward={canNavigateForward}
           onNavigateBack={handleNavigateBack}
           onNavigateForward={handleNavigateForward}
-          fullBleedContent={playerUIState.isLyricsOpen || isDJMode}
-          hideSidebar={playerUIState.isLyricsFullscreen || isDJMode}
+          fullBleedContent={playerUIState.isLyricsOpen || isDJMode || isSplitMode}
+          hideSidebar={playerUIState.isLyricsFullscreen || isDJMode || isSplitMode}
+          splitMode={isSplitMode}
+          splitOrientation={splitOrientation}
+          splitPanel={<QueuePanel onClose={() => setIsSplitMode(false)} />}
           showTransientScrollbar={
             !playerUIState.isLyricsOpen
             && (activeTab?.view === "playlist" || activeTab?.view === "album")
@@ -2054,7 +2067,7 @@ useEffect(() => {
             the close animation didn't start until that guess elapsed, then had to play out a
             spring on top of it. Removing the mirror is what makes closing start immediately.
           */
-          rightPanel={isQueuePanelOpen ? (
+          rightPanel={!isSplitMode && isQueuePanelOpen ? (
             <QueuePanel onClose={() => setIsQueuePanelOpen(false)} />
           ) : undefined}
         >
@@ -2199,7 +2212,7 @@ useEffect(() => {
         different name than PlayerBar's own `group/playerbar` (used internally for its icon
         fade-in), so nesting them here doesn't make PlayerBar's hover styling fire early.
       */}
-      {!isDJMode && <div
+      {!isDJMode && !isSplitMode && <div
         className={cn(
           "group/immersive-playerbar",
           playerUIState.isLyricsFullscreen && "absolute inset-x-0 bottom-0 z-40",
