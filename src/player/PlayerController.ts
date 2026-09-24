@@ -1494,6 +1494,14 @@ export class PlayerController {
     await this.audioEngine.setDeckVolumes(activeVolume, standbyVolume);
   }
 
+  async pauseCuedTrack(track: Track): Promise<boolean> {
+    return this.audioEngine.pausePreloaded(track.id);
+  }
+
+  async seekCuedTrack(track: Track, seconds: number): Promise<boolean> {
+    return this.audioEngine.seekPreloaded(track.id, seconds);
+  }
+
   /** Crossfades from the active deck into a track explicitly cued by DJ Mode. */
   async mixToTrack(track: Track, fadeMs = 4000): Promise<boolean> {
     if (this.audioEngine.usesRustAudio()) {
