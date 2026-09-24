@@ -266,6 +266,8 @@ pub(crate) enum Command {
         volume: f32,
         reply: Sender<bool>,
     },
+    PauseStandby { track_id: String, reply: Sender<bool> },
+    SeekStandby { track_id: String, seconds: f64, reply: Sender<bool> },
     /// Sets the output levels of the active and standby decks independently.
     SetDeckVolumes {
         active_volume: f32,
@@ -871,6 +873,20 @@ impl Engine {
                 self.decks[standby].sink.set_volume(volume.clamp(0.0, self.output_volume()));
                 self.decks[standby].sink.play();
                 let _ = reply.send(true);
+            }
+            Command::PauseStandby { track_id, reply } => {
+                let standby = self.standby();
+                let matched = self.decks[standby].track_id.as_deref() == Some(track_id.as_str());
+                if matched { self.decks[standby].sink.pause(); }
+                let _ = reply.send(matched);
+            }
+            Command::SeekStandby { track_id, seconds, reply } => {
+                let standby = self.standby();
+                let matched = self.decks[standby].track_id.as_deref() == Some(track_id.as_str());
+                if matched {
+                    let ok = self.decks[standby].sink.try_seek(Duration::from_secs_f64(seconds.max(0.0))).is_ok();
+                    let _ = reply.send(ok);
+                } else { let _ = reply.send(false); }
             }
             Command::SetDeckVolumes { active_volume, standby_volume } => {
                 self.cancel_fade();
