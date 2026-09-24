@@ -50,6 +50,10 @@ interface TitleBarProps {
   onOpenDownloads?: () => void;
   onToggleDJMode?: () => void;
   isDJMode?: boolean;
+  isSplitMode?: boolean;
+  splitOrientation?: "vertical" | "horizontal";
+  onToggleSplitMode?: () => void;
+  onToggleSplitOrientation?: () => void;
   onboardingFirstTabId?: string;
 }
 
@@ -76,6 +80,10 @@ export function TitleBar({
   onOpenDownloads,
   onToggleDJMode,
   isDJMode = false,
+  isSplitMode = false,
+  splitOrientation = "vertical",
+  onToggleSplitMode,
+  onToggleSplitOrientation,
   onboardingFirstTabId,
 }: TitleBarProps) {
   const appWindow = getCurrentWindow();
@@ -255,6 +263,35 @@ export function TitleBar({
         chrome the window buttons disappear but these still belong here.
       */}
       <div className="flex shrink-0 items-center gap-1 pl-2 pr-1" aria-label="App actions">
+        {onToggleSplitMode && (
+          <Tooltip side="bottom" content={isSplitMode ? "Exit split view" : "Open split view"}>
+            <button
+              type="button"
+              onClick={onToggleSplitMode}
+              aria-pressed={isSplitMode}
+              aria-label={isSplitMode ? "Exit split view" : "Open split view"}
+              className={cn("px-2 text-[10px] font-black tracking-widest", isSplitMode && "bg-primary/15 text-primary")}
+            >
+              SPLIT
+            </button>
+          </Tooltip>
+        )}
+        {isSplitMode && onToggleSplitOrientation && (
+          <Tooltip
+            side="bottom"
+            content={splitOrientation === "vertical" ? "Switch to horizontal split" : "Switch to vertical split"}
+          >
+            <button
+              type="button"
+              onClick={onToggleSplitOrientation}
+              aria-label={splitOrientation === "vertical" ? "Switch to horizontal split" : "Switch to vertical split"}
+              className="px-2 text-[10px] font-black tracking-widest text-muted-foreground hover:text-foreground"
+            >
+              {splitOrientation === "vertical" ? "VERT" : "HORIZ"}
+            </button>
+          </Tooltip>
+        )}
+
         {onToggleDJMode && (
           <Tooltip side="bottom" content={isDJMode ? "Exit DJ mode" : "Open DJ mode"}>
             <Button
