@@ -4,7 +4,16 @@ import type { PlayerControllerActions } from "../../player/playerStore";
 import type { PlayerSession } from "../../player/PlayerController";
 import { TrackArtwork } from "../components/TrackArtwork";
 import { cn } from "@/lib/utils";
-import { PlayIcon, PauseIcon, SkipNextIcon, MusicNoteIcon } from "@/ui/icons";
+import { PlayIcon, PauseIcon, SkipNextIcon, MusicNoteIcon, ArrowRightIcon } from "@/ui/icons";
+
+/** Bounds for the operator-adjustable "MIX A → B" transition length, in seconds. */
+const MIN_TRANSITION_SEC = 1;
+const MAX_TRANSITION_SEC = 12;
+const DEFAULT_TRANSITION_SEC = 4;
+
+/** Per-deck trim range. 1 is unity gain; this only ever attenuates or boosts around that. */
+const MIN_TRIM = 0.5;
+const MAX_TRIM = 1.5;
 
 interface DJModeProps {
   session: PlayerSession;
@@ -33,11 +42,13 @@ function Deck({
   position,
   duration,
   playing,
+  trim,
   onPlay,
   onCue,
   onSeek,
   onHotCue,
   onLoad,
+  onTrim,
   hotCues,
 }: {
   side: "A" | "B";
@@ -45,11 +56,13 @@ function Deck({
   position: number;
   duration: number;
   playing: boolean;
+  trim: number;
   onPlay: () => void;
   onCue: () => void;
   onSeek: (value: number) => void;
   onHotCue: (index: number) => void;
   onLoad: () => void;
+  onTrim: (value: number) => void;
   hotCues: (number | null)[];
 }) {
   const waveform = useMemo(
@@ -66,12 +79,23 @@ function Deck({
           <div className="mt-1 truncate text-lg font-semibold">{track?.title ?? "Load a track"}</div>
           <div className="truncate text-xs text-muted-foreground">{track?.artist ?? "Choose a song from the library"}</div>
         </div>
-        <div className="flex items-center gap-2 text-[10px] font-semibold text-muted-foreground">
+        <div className="flex items-center gap-3 text-[10px] font-semibold text-muted-foreground">
+          <label className="flex items-center gap-1.5">
+            <span className="tracking-widest">TRIM</span>
+            <input
+              aria-label={`Deck ${side} trim`}
+              type="range"
+              min={MIN_TRIM}
+              max={MAX_TRIM}
+              step={0.01}
+              value={trim}
+              onChange={(event) => onTrim(Number(event.target.value))}
+              className="w-16 accent-[var(--color-primary)]"
+            />
+          </label>
           <button type="button" onClick={onLoad} className="rounded-lg bg-primary/15 px-2 py-1 font-bold text-primary hover:bg-primary/25">
             LOAD
           </button>
-          <span className="rounded-full bg-muted px-2 py-1">128 BPM</span>
-          <span className="rounded-full bg-muted px-2 py-1">8A</span>
         </div>
       </div>
 
@@ -140,6 +164,11 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   const [hotCuesA, setHotCuesA] = useState<(number | null)[]>([null, null, null, null]);
   const [hotCuesB, setHotCuesB] = useState<(number | null)[]>([null, null, null, null]);
   const [showDeckPicker, setShowDeckPicker] = useState<"A" | "B" | null>(null);
+  const [trimA, setTrimA] = useState(1);
+  const [trimB, setTrimB] = useState(1);
+  const [transitionSec, setTransitionSec] = useState(DEFAULT_TRANSITION_SEC);
+  const [isMixing, setIsMixing] = useState(false);
+  const canMix = Boolean(deckB) && !isMixing;
 
   const deckA = session.currentTrack;
   const durationA = deckA?.durationSec ?? playerController.getDuration();
@@ -200,24 +229,44 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     });
   }, [deckB, playerController]);
 
+  // Equal-power crossfade curve, then each deck's own trim knob on top. Trim is a client-side
+  // gain multiplier — the native engine only exposes one volume per deck, so "TRIM" is exactly
+  // that volume scaled before it is sent down, the same way a real mixer channel gain sits
+  // upstream of the crossfader.
+  const deckVolumes = (normalized: number): [number, number] => {
+    const angle = Math.max(0, Math.min(1, normalized)) * Math.PI / 2;
+    return [
+      Math.max(0, Math.min(1, Math.cos(angle) * trimA)),
+      Math.max(0, Math.min(1, Math.sin(angle) * trimB)),
+    ];
+  };
+
   const applyCrossfader = (value: number) => {
     const normalized = Math.max(0, Math.min(100, value)) / 100;
     setCrossfader(value);
-    // Equal-power curve: the middle keeps both decks present instead of creating a volume dip.
-    const angle = normalized * Math.PI / 2;
-    void playerController.setDjDeckVolumes(
-      Math.cos(angle),
-      Math.sin(angle),
-    );
+    const [volumeA, volumeB] = deckVolumes(normalized);
+    void playerController.setDjDeckVolumes(volumeA, volumeB);
 
     // Like a professional DJ app, moving toward a silent prepared deck can start that deck.
     if (deckB && normalized > 0 && !deckBPlaying) {
-      void playerController.playCuedTrack(deckB, Math.sin(angle)).then((started) => {
+      void playerController.playCuedTrack(deckB, volumeB).then((started) => {
         if (!started) return;
         setDeckBPlaying(true);
         setDeckBStartedAt(Date.now());
       });
     }
+  };
+
+  // Trim knobs re-apply the current crossfader position immediately, so nudging a knob is
+  // audible right away instead of waiting for the next crossfader move.
+  const applyTrim = (side: "A" | "B", value: number) => {
+    const clamped = Math.max(MIN_TRIM, Math.min(MAX_TRIM, value));
+    if (side === "A") setTrimA(clamped); else setTrimB(clamped);
+    const normalized = crossfader / 100;
+    const angle = normalized * Math.PI / 2;
+    const volumeA = Math.max(0, Math.min(1, Math.cos(angle) * (side === "A" ? clamped : trimA)));
+    const volumeB = Math.max(0, Math.min(1, Math.sin(angle) * (side === "B" ? clamped : trimB)));
+    void playerController.setDjDeckVolumes(volumeA, volumeB);
   };
 
   const playA = async () => {
@@ -226,10 +275,8 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
       return;
     }
     await playerController.playDjActive();
-    void playerController.setDjDeckVolumes(
-      Math.cos((crossfader / 100) * Math.PI / 2),
-      Math.sin((crossfader / 100) * Math.PI / 2),
-    );
+    const [volumeA, volumeB] = deckVolumes(crossfader / 100);
+    void playerController.setDjDeckVolumes(volumeA, volumeB);
   };
 
   const playB = async () => {
@@ -242,8 +289,8 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
       }
       return;
     }
-    const normalized = crossfader / 100;
-    const started = await playerController.playCuedTrack(deckB, Math.sin(normalized * Math.PI / 2));
+    const [, volumeB] = deckVolumes(crossfader / 100);
+    const started = await playerController.playCuedTrack(deckB, volumeB);
     if (started) {
       setDeckBPlaying(true);
       setDeckBStartedAt(Date.now() - deckBPosition * 1000);
@@ -260,6 +307,31 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     // Loading a track onto Deck B must never move the crossfader or change Deck A's level.
     // The two decks are independent: the crossfader is the only control that changes their mix.
     setDeckB(track);
+  };
+
+  /**
+   * The headline DJ move: hand playback from the active deck straight to the cued Deck B over
+   * `transitionSec`, using the real native crossfade rather than the manual crossfader slider.
+   * On success Deck B becomes the new active track (the engine swaps deck ownership), so we
+   * clear the standby side and let the effect above refill it from the queue.
+   */
+  const mixAtoB = async () => {
+    if (!deckB || isMixing) return;
+    setIsMixing(true);
+    try {
+      const mixed = await playerController.mixToTrack(deckB, transitionSec * 1000);
+      if (mixed) {
+        setCrossfader(0);
+        setDeckB(null);
+        setDeckBPlaying(false);
+        setDeckBDuration(0);
+        setDeckBPosition(0);
+        setDeckBStartedAt(null);
+        setHotCuesB([null, null, null, null]);
+      }
+    } finally {
+      setIsMixing(false);
+    }
   };
 
   const nextTracks = session.queue.filter((track) => track.id !== deckA?.id);
@@ -297,11 +369,13 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             position={deckAPosition}
             duration={durationA}
             playing={session.status === "playing"}
+            trim={trimA}
             onPlay={() => void playA()}
             onCue={() => void playerController.seekTo(hotCuesA[0] ?? 0)}
             onSeek={(value) => void playerController.seekTo(value)}
             onHotCue={(i) => setCue("A", i)}
             onLoad={() => setShowDeckPicker("A")}
+            onTrim={(value) => applyTrim("A", value)}
             hotCues={hotCuesA}
           />
           <Deck
@@ -310,6 +384,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             position={deckBPosition}
             duration={durationB}
             playing={deckBPlaying}
+            trim={trimB}
             onPlay={() => void playB()}
             onCue={() => {
               if (deckB) void playerController.cueTrack(deckB);
@@ -319,14 +394,13 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
               if (deckB) {
                 void playerController.seekCuedTrack(deckB, value);
                 if (deckBPlaying) setDeckBStartedAt(Date.now() - value * 1000);
-                void playerController.setDjDeckVolumes(
-                  Math.cos((crossfader / 100) * Math.PI / 2),
-                  Math.sin((crossfader / 100) * Math.PI / 2),
-                );
+                const [volumeA, volumeB] = deckVolumes(crossfader / 100);
+                void playerController.setDjDeckVolumes(volumeA, volumeB);
               }
             }}
             onHotCue={(i) => setCue("B", i)}
             onLoad={() => setShowDeckPicker("B")}
+            onTrim={(value) => applyTrim("B", value)}
             hotCues={hotCuesB}
           />
         </div>
@@ -349,8 +423,45 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             <span>DECK A</span><span>CENTER MIX</span><span>DECK B</span>
           </div>
           <p className="mt-3 text-[10px] text-muted-foreground">
-            Both decks can play at the same time. Move the crossfader left/right to blend or switch between them.
+            Both decks can play at the same time. Move the crossfader left/right to blend or switch between them,
+            or let MIX A → B do it for you with the native engine's real crossfade.
           </p>
+
+          <div className="mt-4 flex items-center gap-3 border-t border-white/5 pt-4">
+            <button
+              type="button"
+              onClick={() => void mixAtoB()}
+              disabled={!canMix}
+              className={cn(
+                "flex shrink-0 items-center gap-1.5 rounded-xl px-4 py-2.5 text-xs font-bold tracking-wide",
+                canMix
+                  ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:bg-primary/90"
+                  : "cursor-not-allowed bg-muted text-muted-foreground",
+              )}
+            >
+              {isMixing ? "MIXING…" : "MIX A"}
+              <ArrowRightIcon size={13} />
+              {isMixing ? "" : "B"}
+            </button>
+            <label className="flex flex-1 items-center gap-2 text-[10px] font-semibold text-muted-foreground">
+              <span className="shrink-0 tracking-widest">TRANSITION</span>
+              <input
+                aria-label="Transition length"
+                type="range"
+                min={MIN_TRANSITION_SEC}
+                max={MAX_TRANSITION_SEC}
+                step={1}
+                value={transitionSec}
+                onChange={(event) => setTransitionSec(Number(event.target.value))}
+                disabled={isMixing}
+                className="w-full accent-[var(--color-primary)]"
+              />
+              <span className="w-6 shrink-0 text-right text-foreground">{transitionSec}s</span>
+            </label>
+          </div>
+          {!deckB && (
+            <p className="mt-2 text-[10px] text-muted-foreground">Load a track on Deck B to enable MIX A → B.</p>
+          )}
         </div>
 
         <div className="mt-4 rounded-2xl bg-card/60 p-4">
