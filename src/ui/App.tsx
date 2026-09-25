@@ -307,6 +307,22 @@ export default function App() {
   const playerUIState = usePlayerUIState();
   const [isDJMode, setIsDJMode] = useState(false);
   const [isSplitMode, setIsSplitMode] = useState(false);
+  // DJ Mode and Split Mode both render a DJMode instance. Keep them mutually exclusive so there
+  // is never more than one live DJ controller operating the same native two-deck engine.
+  const handleToggleDJMode = useCallback(() => {
+    setIsDJMode((open) => {
+      const next = !open;
+      if (next) setIsSplitMode(false);
+      return next;
+    });
+  }, []);
+  const handleToggleSplitMode = useCallback(() => {
+    setIsSplitMode((open) => {
+      const next = !open;
+      if (next) setIsDJMode(false);
+      return next;
+    });
+  }, []);
   const [splitOrientation, setSplitOrientation] = useState<"vertical" | "horizontal">("vertical");
   const miniPlayerEnabled = useMiniPlayerEnabled();
   const miniPlayerWindowLive = useMiniPlayerWindowLive();
@@ -2020,11 +2036,11 @@ useEffect(() => {
         onReorderTab={handleReorderTab}
         onOpenSettings={handleOpenSettings}
         onOpenDownloads={() => handleOpenBrowse("downloads")}
-        onToggleDJMode={() => setIsDJMode((open) => !open)}
+        onToggleDJMode={handleToggleDJMode}
         isDJMode={isDJMode}
         isSplitMode={isSplitMode}
         splitOrientation={splitOrientation}
-        onToggleSplitMode={() => setIsSplitMode((open) => !open)}
+        onToggleSplitMode={handleToggleSplitMode}
         onToggleSplitOrientation={() =>
           setSplitOrientation((orientation) =>
             orientation === "vertical" ? "horizontal" : "vertical",
