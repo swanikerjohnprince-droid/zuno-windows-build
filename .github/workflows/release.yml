@@ -102,6 +102,14 @@ jobs:
       - name: Initialize Tauri Android project
         run: npm run tauri android init
 
+      - name: Configure Android API level for native audio
+        run: |
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi26-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android26-clang" >> "$GITHUB_ENV"
+          grep -n "minSdk" src-tauri/gen/android/app/build.gradle.kts || true
+          sed -i 's/minSdk *= *[0-9][0-9]*/minSdk = 26/g' src-tauri/gen/android/app/build.gradle.kts
+
       - name: Build Android APK
         run: npm run tauri android build -- --apk
 
