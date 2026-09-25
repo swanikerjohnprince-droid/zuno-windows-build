@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 jobs:
@@ -117,3 +117,39 @@ jobs:
           name: Zuno-Android
           path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
+
+  publish-release:
+    name: Publish Windows and Android release assets
+    runs-on: ubuntu-22.04
+    needs: [build-windows, build-android]
+
+    steps:
+      - name: Download Windows build
+        uses: actions/download-artifact@v4
+        with:
+          name: Zuno-Windows
+          path: release/windows
+
+      - name: Download Android build
+        uses: actions/download-artifact@v4
+        with:
+          name: Zuno-Android
+          path: release/android
+
+      - name: Prepare release assets
+        run: |
+          set -e
+          mkdir -p release-assets
+          windows_exe="$(find release/windows -type f -name '*.exe' | head -1)"
+          android_apk="$(find release/android -type f -name '*.apk' | head -1)"
+          test -n "$windows_exe"
+          test -n "$android_apk"
+          cp "$windows_exe" release-assets/Zuno-DJ-Windows.exe
+          cp "$android_apk" release-assets/Zuno-DJ-Android.apk
+          ls -lh release-assets
+
+      - name: Upload assets to v1.4.0 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload v1.4.0 release-assets/Zuno-DJ-Windows.exe release-assets/Zuno-DJ-Android.apk --repo "${{ github.repository }}" --clobber
