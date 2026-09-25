@@ -3,6 +3,8 @@ name: Build Zuno for Windows
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -30,8 +32,35 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Prepare Tauri signing
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            @'
+          {
+            "bundle": {
+              "createUpdaterArtifacts": false
+            }
+          }
+          '@ | Set-Content -Path "tauri.build.json"
+            "TAURI_BUILD_CONFIG=tauri.build.json" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Write-Host "No Tauri signing key configured; updater artifacts will be disabled for this build."
+          } else {
+            Write-Host "Tauri signing key is configured; updater artifacts will be signed."
+          }
+
       - name: Build Zuno
-        run: npm run tauri build -- --bundles nsis
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ($env:TAURI_BUILD_CONFIG) {
+            npm run tauri build -- --bundles nsis --config $env:TAURI_BUILD_CONFIG
+          } else {
+            npm run tauri build -- --bundles nsis
+          }
 
       - name: Find Windows executable
         shell: pwsh
