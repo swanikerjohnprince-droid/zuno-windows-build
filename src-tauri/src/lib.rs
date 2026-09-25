@@ -1606,6 +1606,7 @@ fn minimize_to_tray_enabled(app: &tauri::AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(desktop)]
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -1630,6 +1631,7 @@ fn close_or_hide_main_window(app: &tauri::AppHandle) {
     app.exit(0);
 }
 
+#[cfg(desktop)]
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{TrayIconBuilder, TrayIconEvent};
@@ -5298,19 +5300,23 @@ pub fn run() {
          * it immediately. Reuses the tray's own "bring to front" — a second launch is exactly
          * that, wherever it came from.
          */
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            show_main_window(app);
-        }))
         .manage(CacheLock(Mutex::new(())))
         .manage(AppSettingsLock(Mutex::new(())))
         .manage(AccountStoreLock(Mutex::new(())))
         .manage(YoutubeCookieJar(Mutex::new(CookieJarState::default())))
         .manage(discord_manager)
-        .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init());
+
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }));
+        builder = builder.plugin(tauri_plugin_autostart::Builder::new().build());
+    }
 
     #[cfg(not(debug_assertions))]
     {
@@ -5347,6 +5353,7 @@ pub fn run() {
                 std::eprintln!("[internal][tauri][warn] {}", error.message);
             }
             // Always built, so toggling the setting takes effect without a restart.
+            #[cfg(desktop)]
             if let Err(error) = build_tray(app.handle()) {
                 std::eprintln!("[internal][tauri][warn] tray unavailable: {error}");
             }
@@ -5354,13 +5361,21 @@ pub fn run() {
         })
         .on_window_event(move |window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
-                eprintln!(
-                    "[internal][tauri][info] window close requested label={}",
-                    window.label()
-                );
-                if window.label() == "main" {
-                    api.prevent_close();
-                    close_or_hide_main_window(window.app_handle());
+                #[cfg(desktop)]
+                {
+                    eprintln!(
+                        "[internal][tauri][info] window close requested label={}",
+                        window.label()
+                    );
+                    if window.label() == "main" {
+                        api.prevent_close();
+                        close_or_hide_main_window(window.app_handle());
+                    }
+                }
+                #[cfg(mobile)]
+                {
+                    let _ = api;
+                    let _ = window;
                 }
             }
             tauri::WindowEvent::Focused(false) => {
