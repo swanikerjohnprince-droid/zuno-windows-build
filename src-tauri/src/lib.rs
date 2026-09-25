@@ -2307,13 +2307,15 @@ fn build_login_window(
     )
     .title("Sign in to YouTube Music")
     .visible(visible)
-    .skip_taskbar(!visible)
     .inner_size(520.0, 760.0)
     .on_page_load(move |_window, payload| {
         if payload.event() == tauri::webview::PageLoadEvent::Finished {
             loaded.store(true, Ordering::Relaxed);
         }
     });
+    #[cfg(desktop)]
+    let window_builder = window_builder.skip_taskbar(!visible);
+
     // See YOUTUBE_LOGIN_DATA_DIR: without its own partition, clearing this window's data
     // clears the main window's storage too.
     #[cfg(not(target_os = "macos"))]
