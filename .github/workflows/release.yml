@@ -153,3 +153,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload v1.4.0 release-assets/Zuno-DJ-Windows.exe release-assets/Zuno-DJ-Android.apk --repo "${{ github.repository }}" --clobber
+
+# DJ patch build trigger
