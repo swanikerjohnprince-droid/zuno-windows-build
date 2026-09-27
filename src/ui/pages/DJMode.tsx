@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Track } from "../../datasource/types";
 import type { PlayerControllerActions } from "../../player/playerStore";
 import type { PlayerSession } from "../../player/PlayerController";
@@ -172,9 +172,29 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
 
   // Tell the controller that this DJ surface owns a live standby deck. This prevents a normal
   // browse/search track change from tearing Deck B down while Split Mode remains open.
+  const cleanupRef = useRef({ deckB, deckBPlaying, playerController });
+  cleanupRef.current = { deckB, deckBPlaying, playerController };
   useEffect(() => {
     playerController.setDjDeckActive(true);
-    return () => playerController.setDjDeckActive(false);
+    return () => {
+      const {
+        deckB: exitingDeckB,
+        deckBPlaying: exitingDeckBPlaying,
+        playerController: exitingController,
+      } = cleanupRef.current;
+      exitingController.setDjDeckActive(false);
+      if (exitingDeckBPlaying && exitingDeckB) {
+        void exitingController.pauseCuedTrack(exitingDeckB);
+      }
+      void exitingController.setDjDeckVolumes(1, 0);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playerController]);
+
+  // Start with a known mixer state whenever DJ/Split Mode mounts.
+  useEffect(() => {
+    void playerController.setDjDeckVolumes(1, 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playerController]);
 
   const deckA = session.currentTrack;
@@ -278,10 +298,10 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
 
   const playA = async () => {
     if (session.status === "playing") {
-      await playerController.pauseDjActive();
+      await playerController.pause();
       return;
     }
-    await playerController.playDjActive();
+    await playerController.play();
     const [volumeA, volumeB] = deckVolumes(crossfader / 100);
     void playerController.setDjDeckVolumes(volumeA, volumeB);
   };
