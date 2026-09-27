@@ -170,6 +170,13 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   const [isMixing, setIsMixing] = useState(false);
   const canMix = Boolean(deckB) && !isMixing;
 
+  // Tell the controller that this DJ surface owns a live standby deck. This prevents a normal
+  // browse/search track change from tearing Deck B down while Split Mode remains open.
+  useEffect(() => {
+    playerController.setDjDeckActive(true);
+    return () => playerController.setDjDeckActive(false);
+  }, [playerController]);
+
   const deckA = session.currentTrack;
   const durationA = deckA?.durationSec ?? playerController.getDuration();
   const durationB = deckBDuration || deckB?.durationSec || 0;
@@ -328,6 +335,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
         setDeckBPosition(0);
         setDeckBStartedAt(null);
         setHotCuesB([null, null, null, null]);
+        setHotCuesA([null, null, null, null]);
       }
     } finally {
       setIsMixing(false);
