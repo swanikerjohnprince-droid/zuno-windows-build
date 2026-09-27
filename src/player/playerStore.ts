@@ -59,6 +59,7 @@ type PlayerControllerMethod =
   | "pause"
   | "playDjActive"
   | "pauseDjActive"
+  | "setDjDeckActive"
   | "togglePlayPause"
   | "addToQueue"
   | "playNext"
@@ -121,6 +122,7 @@ class ActivePlayerController implements PlayerControllerActions {
   pause = () => tabManager.getActivePlayer().pause();
   playDjActive = () => tabManager.getActivePlayer().playDjActive();
   pauseDjActive = () => tabManager.getActivePlayer().pauseDjActive();
+  setDjDeckActive = (active: boolean) => tabManager.getActivePlayer().setDjDeckActive(active);
   togglePlayPause = () => tabManager.getActivePlayer().togglePlayPause();
   addToQueue = (track: Parameters<PlayerController["addToQueue"]>[0]) =>
     tabManager.getActivePlayer().addToQueue(track);
