@@ -176,6 +176,8 @@ export class PlayerController {
   private readonly listeners = new Set<Listener>();
   private readonly recommendationHistory = new Map<string, string[]>();
   private loadedTrackId: string | null = null;
+  /** True while DJ/Split Mode owns a live standby deck. */
+  private djDeckActive = false;
   private isTabActive = false;
   private playTrackRequestId = 0;
   private autoplayEnabled = false;
@@ -361,6 +363,11 @@ export class PlayerController {
     return this.audioEngine.pauseDjActive();
   }
 
+  /** Keep ordinary browse loads from tearing down DJ Mode's standby deck. */
+  setDjDeckActive(active: boolean): void {
+    this.djDeckActive = active;
+  }
+
   async loadTrack(track: Track, preserveDjDeck = false): Promise<void> {
     logInternalInfo("PlayerController.loadTrack start", { trackId: track.id, preserveDjDeck });
     // A normal Zuno load owns the whole playback surface and must not leave a DJ standby
@@ -404,7 +411,7 @@ export class PlayerController {
      * is the one already cued, the transition in ensureTrackLoaded takes over the handover.
      */
     if (!this.audioEngine.hasPreloaded(videoId)) {
-      this.audioEngine.stop();
+      this.audioEngine.stop(this.djDeckActive);
       this.audioEngine.silenceCompetingPlayback();
     }
     // Captured before the reset below: this is the only place that still knows whether a track
@@ -1521,12 +1528,24 @@ export class PlayerController {
     return this.audioEngine.seekPreloaded(track.id, seconds);
   }
 
-  /** Crossfades from the active deck into a track explicitly cued by DJ Mode. */
+  /**
+   * Crossfades from the active deck into a track explicitly cued by DJ Mode.
+   */
   async mixToTrack(track: Track, fadeMs = 4000): Promise<boolean> {
     if (this.audioEngine.usesRustAudio()) {
       const ready = await this.cueTrack(track);
       if (!ready) return false;
-      return this.audioEngine.transitionToPreloaded(track.id, Math.max(0, fadeMs));
+      this.finishPlayReport();
+      const swapped = await this.audioEngine.transitionToPreloaded(track.id, Math.max(0, fadeMs));
+      if (!swapped) return false;
+      this.loadedTrackId = track.id;
+      this.setState({
+        currentTrack: track,
+        history: this.appendHistory(track),
+        status: "playing",
+        error: null,
+      });
+      return true;
     }
     return this.playTrackById(track.id);
   }
