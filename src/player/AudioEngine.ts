@@ -564,7 +564,7 @@ export class AudioEngine {
     return false;
   }
 
-  stop(): void {
+  stop(preserveDjDeck = false): void {
     this.loadRequestId += 1;
     if (playbackOwner === this) {
       playbackOwner = null;
@@ -572,7 +572,11 @@ export class AudioEngine {
     }
     this.cancelFade();
     this.iframeFallbackActive = false;
-    this.releaseRustAudio();
+    if (preserveDjDeck && this.rustStandbyTrackId) {
+      this.releaseActiveRustAudio();
+    } else {
+      this.releaseRustAudio();
+    }
     this.releaseNativeAudio();
     this.player?.stopVideo();
     this.discardStandby();
@@ -1068,6 +1072,20 @@ export class AudioEngine {
       videoId,
       kind: source.kind,
       durationSec: duration,
+    });
+  }
+
+  /**
+   * Clears only the active Rust deck, preserving the standby deck used by DJ Mode.
+   */
+  private releaseActiveRustAudio(): void {
+    if (!this.rustTrackId) return;
+    const ownsRustPlayback = playbackOwner === null || playbackOwner === this;
+    this.rustTrackId = null;
+    this.rustDurationSec = 0;
+    if (!ownsRustPlayback) return;
+    void rustAudio.dropActive().catch((error: unknown) => {
+      rustAudio.warn("AudioEngine rust dropActive (stop, preserveDjDeck) failed", error);
     });
   }
 
