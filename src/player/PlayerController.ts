@@ -378,12 +378,18 @@ export class PlayerController {
 
   /** DJ Mode pauses Deck A without touching Deck B. */
   async pauseDjActive(): Promise<boolean> {
-    return this.audioEngine.pauseDjActive();
+    const paused = await this.audioEngine.pauseDjActive();
+    // Without this the store keeps saying "playing", so Deck A's button stays on "pause" and
+    // the next press pauses again instead of playing.
+    if (paused) this.setState({ status: "paused", error: null });
+    return paused;
   }
 
   /** Keep ordinary browse loads from tearing down DJ Mode's standby deck. */
   setDjDeckActive(active: boolean): void {
     this.djDeckActive = active;
+    // The engine keeps its own copy: it is what stops loadRustAudio from dropping Deck B.
+    this.audioEngine.setDjDeckActive(active);
   }
 
   async loadTrack(track: Track, preserveDjDeck = false): Promise<void> {
@@ -392,6 +398,9 @@ export class PlayerController {
     // deck sounding underneath it. DJ Mode explicitly opts out so Deck A can coexist with Deck B.
     if (!preserveDjDeck) {
       this.audioEngine.stop();
+    } else {
+      // Replacing Deck A: silence the outgoing Deck A track, keep Deck B decoded and playing.
+      this.audioEngine.stop(true);
     }
     this.pendingSeekTime = null;
     this.setState({ status: "loading", error: null });
@@ -1524,7 +1533,7 @@ export class PlayerController {
   /** Starts a track already decoded on the standby DJ deck without swapping active ownership. */
   async playCuedTrack(track: Track, volume = 0): Promise<boolean> {
     if (!this.audioEngine.usesRustAudio()) return false;
-    const ready = await this.cueTrack(track);
+    const ready = this.audioEngine.hasPreloaded(track.id) || await this.cueTrack(track);
     if (!ready) return false;
     return this.audioEngine.playPreloaded(track.id, volume);
   }
@@ -1551,7 +1560,7 @@ export class PlayerController {
    */
   async mixToTrack(track: Track, fadeMs = 4000): Promise<boolean> {
     if (this.audioEngine.usesRustAudio()) {
-      const ready = await this.cueTrack(track);
+      const ready = this.audioEngine.hasPreloaded(track.id) || await this.cueTrack(track);
       if (!ready) return false;
       this.finishPlayReport();
       const swapped = await this.audioEngine.transitionToPreloaded(track.id, Math.max(0, fadeMs));
@@ -1569,6 +1578,8 @@ export class PlayerController {
   }
 
   private warmNextTrack(): void {
+    // DJ Mode owns the standby deck (Deck B). Warming would decode the next queue track over it.
+    if (this.djDeckActive) return;
     const next = this.peekNextTrack();
     if (!next) return;
 
@@ -1720,6 +1731,7 @@ export class PlayerController {
    * second one before the first has finished.
    */
   private onTransitionTick(): void {
+    if (this.djDeckActive) return;
     if (this.transitioning || this.state.status !== "playing" || !this.isTabActive) return;
 
     const duration = this.audioEngine.getDuration();
