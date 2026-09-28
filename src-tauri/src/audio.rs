@@ -224,6 +224,10 @@ struct Fade {
     duration: Duration,
     /// The deck being faded out — already the standby by the time this exists.
     outgoing: usize,
+    /// Levels the two decks were at when the fade began. A DJ may already have Deck B audible
+    /// and the crossfader mid-way, and ramping from silence/full would make both decks jump.
+    outgoing_from: f32,
+    incoming_from: f32,
 }
 
 pub(crate) enum Command {
@@ -839,9 +843,11 @@ impl Engine {
 
                 self.cancel_fade();
                 let target = self.output_volume();
+                let outgoing_from = self.decks[self.active].sink.volume().min(target);
+                let incoming_from = self.decks[standby].sink.volume().min(target);
                 self.decks[standby]
                     .sink
-                    .set_volume(if fade_ms > 0 { 0.0 } else { target });
+                    .set_volume(if fade_ms > 0 { incoming_from } else { target });
                 self.decks[standby].sink.set_speed(self.rate);
                 self.decks[standby].sink.play();
 
@@ -854,6 +860,8 @@ impl Engine {
                         started_at: Instant::now(),
                         duration: Duration::from_millis(fade_ms),
                         outgoing,
+                        outgoing_from,
+                        incoming_from,
                     });
                 } else {
                     self.decks[outgoing].clear();
@@ -889,7 +897,11 @@ impl Engine {
                 } else { let _ = reply.send(false); }
             }
             Command::SetDeckVolumes { active_volume, standby_volume } => {
-                self.cancel_fade();
+                // A running MIX owns both volumes. Cancelling it here would snap the incoming
+                // deck to full and leave the outgoing deck playing forever, never cleared.
+                if self.fade.is_some() {
+                    return false;
+                }
                 self.decks[self.active]
                     .sink
                     .set_volume(active_volume.clamp(0.0, self.output_volume()));
@@ -980,6 +992,7 @@ impl Engine {
             / fade.duration.as_secs_f32().max(f32::EPSILON))
         .clamp(0.0, 1.0);
         let outgoing = fade.outgoing;
+        let (outgoing_from, incoming_from) = (fade.outgoing_from, fade.incoming_from);
         let target = self.output_volume();
 
         /*
@@ -989,10 +1002,11 @@ impl Engine {
          */
         self.decks[outgoing]
             .sink
-            .set_volume(target * (progress * std::f32::consts::FRAC_PI_2).cos());
+            .set_volume(outgoing_from * (progress * std::f32::consts::FRAC_PI_2).cos());
+        let rise = (progress * std::f32::consts::FRAC_PI_2).sin();
         self.decks[self.active]
             .sink
-            .set_volume(target * (progress * std::f32::consts::FRAC_PI_2).sin());
+            .set_volume(incoming_from + (target - incoming_from) * rise);
 
         if progress >= 1.0 {
             self.fade = None;
