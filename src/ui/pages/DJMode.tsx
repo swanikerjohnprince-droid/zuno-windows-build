@@ -303,13 +303,15 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
 
   const playA = async () => {
     if (session.status === "playing") {
-      await playerController.pause();
+      await playerController.pauseDjActive();
       return;
     }
-    await playerController.play();
-    // Preserve Deck B's live level when a new Deck A track is started.
-    const [volumeA, volumeB] = deckMixVolumes;
-    void playerController.setDjDeckVolumes(volumeA, volumeB);
+    const started = await playerController.playDjActive();
+    if (started) {
+      // Preserve Deck B's live level when a replacement Deck A track is started.
+      const [volumeA, volumeB] = deckMixVolumes;
+      void playerController.setDjDeckVolumes(volumeA, volumeB);
+    }
   };
 
   const playB = async () => {
