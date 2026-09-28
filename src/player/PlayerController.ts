@@ -355,7 +355,25 @@ export class PlayerController {
 
   /** DJ Mode starts Deck A without invoking Zuno's global playback ownership. */
   async playDjActive(): Promise<boolean> {
-    return this.audioEngine.playDjActive();
+    const track = this.state.currentTrack;
+    if (!track) return false;
+
+    try {
+      // Replacing Deck A clears loadedTrackId, so load the replacement into the active
+      // native deck before starting it. This deliberately bypasses play(), which claims
+      // global playback and would pause/mute the live Deck B.
+      await this.ensureTrackLoaded(track);
+      const started = await this.audioEngine.playDjActive();
+      if (started) {
+        this.setState({ status: "playing", error: null });
+      } else {
+        this.setState({ status: "paused", error: null });
+      }
+      return started;
+    } catch (error) {
+      this.setError(error);
+      return false;
+    }
   }
 
   /** DJ Mode pauses Deck A without touching Deck B. */
