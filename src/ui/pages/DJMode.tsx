@@ -278,14 +278,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     setDeckMixVolumes([volumeA, volumeB]);
     void playerController.setDjDeckVolumes(volumeA, volumeB);
 
-    // Like a professional DJ app, moving toward a silent prepared deck can start that deck.
-    if (deckB && normalized > 0 && !deckBPlaying) {
-      void playerController.playCuedTrack(deckB, volumeB).then((started) => {
-        if (!started) return;
-        setDeckBPlaying(true);
-        setDeckBStartedAt(Date.now());
-      });
-    }
+    // The crossfader is a mixer control only. It must never implicitly start a paused deck.
   };
 
   // Trim knobs re-apply the current crossfader position immediately, so nudging a knob is
@@ -316,10 +309,13 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     if (!deckB) return;
     if (deckBPlaying) {
       const paused = await playerController.pauseCuedTrack(deckB);
-      if (paused) {
-        setDeckBPlaying(false);
-        setDeckBStartedAt(null);
+      // Pause is a user command, so the UI state must follow it even if the native
+      // standby reports a transient false during a deck handoff.
+      if (!paused) {
+        console.warn("Deck B pause did not report a matching standby deck", deckB.id);
       }
+      setDeckBPlaying(false);
+      setDeckBStartedAt(null);
       return;
     }
     const [, volumeB] = deckVolumes(crossfader / 100);
