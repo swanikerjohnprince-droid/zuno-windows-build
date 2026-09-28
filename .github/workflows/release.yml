@@ -111,11 +111,53 @@ jobs:
       - name: Build Android APK
         run: npm run tauri android build -- --apk
 
+      # Sign the release APK so Android can install it. If the persistent keystore
+      # secrets are configured, the same key is reused across releases. Otherwise,
+      # a throwaway key makes the APK installable but requires uninstalling an older
+      # build before installing a new one.
+      - name: Sign Android APK
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          BT="$ANDROID_SDK_ROOT/build-tools/35.0.0"
+          OUT_DIR=src-tauri/gen/android/app/build/outputs/apk
+          UNSIGNED="$(find "$OUT_DIR" -type f -name '*-unsigned.apk' | head -1)"
+          if [ -z "$UNSIGNED" ]; then
+            UNSIGNED="$(find "$OUT_DIR" -type f -name '*release*.apk' | head -1)"
+          fi
+          test -n "$UNSIGNED"
+          echo "Signing: $UNSIGNED"
+
+          KEYSTORE="$RUNNER_TEMP/zuno.keystore"
+          if [ -n "${KEYSTORE_B64:-}" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$KEYSTORE"
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 not set - signing with a throwaway key. Updates will not install over a previous build."
+            KEYSTORE_PASSWORD="zunothrowaway"
+            KEY_ALIAS="zuno"
+            KEY_PASSWORD="$KEYSTORE_PASSWORD"
+            keytool -genkeypair -keystore "$KEYSTORE" -storepass "$KEYSTORE_PASSWORD" \
+              -alias "$KEY_ALIAS" -keypass "$KEY_PASSWORD" -keyalg RSA -keysize 2048 \
+              -validity 10000 -dname "CN=Zuno DJ"
+          fi
+
+          mkdir -p signed
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" signed/aligned.apk
+          "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass "pass:$KEYSTORE_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" --key-pass "pass:$KEY_PASSWORD" \
+            --out signed/Zuno-DJ-Android.apk signed/aligned.apk
+          rm signed/aligned.apk
+          "$BT/apksigner" verify --print-certs signed/Zuno-DJ-Android.apk
+
       - name: Upload Android APK
         uses: actions/upload-artifact@v4
         with:
           name: Zuno-Android
-          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          path: signed/Zuno-DJ-Android.apk
           if-no-files-found: error
 
   publish-release:
