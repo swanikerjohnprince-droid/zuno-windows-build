@@ -171,6 +171,9 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   const [transitionSec, setTransitionSec] = useState(DEFAULT_TRANSITION_SEC);
   const [isMixing, setIsMixing] = useState(false);
   const canMix = Boolean(deckB) && !isMixing;
+  // Set synchronously so a fast slider drag cannot start Deck B several times before the first
+  // playCuedTrack resolves and flips deckBPlaying.
+  const deckBStartingRef = useRef(false);
 
   // Tell the controller that this DJ surface owns a live standby deck. This prevents a normal
   // browse/search track change from tearing Deck B down while Split Mode remains open.
@@ -272,6 +275,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   };
 
   const applyCrossfader = (value: number) => {
+    if (isMixing) return;
     const normalized = Math.max(0, Math.min(100, value)) / 100;
     setCrossfader(value);
     const [volumeA, volumeB] = deckVolumes(normalized);
@@ -279,11 +283,14 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     void playerController.setDjDeckVolumes(volumeA, volumeB);
 
     // Like a professional DJ app, moving toward a silent prepared deck can start that deck.
-    if (deckB && normalized > 0 && !deckBPlaying) {
+    if (deckB && normalized > 0 && !deckBPlaying && !deckBStartingRef.current) {
+      deckBStartingRef.current = true;
       void playerController.playCuedTrack(deckB, volumeB).then((started) => {
         if (!started) return;
         setDeckBPlaying(true);
-        setDeckBStartedAt(Date.now());
+        setDeckBStartedAt(Date.now() - deckBPosition * 1000);
+      }).finally(() => {
+        deckBStartingRef.current = false;
       });
     }
   };
@@ -292,6 +299,10 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   // audible right away instead of waiting for the next crossfader move.
   const applyTrim = (side: "A" | "B", value: number) => {
     const clamped = Math.max(MIN_TRIM, Math.min(MAX_TRIM, value));
+    if (isMixing) {
+      if (side === "A") setTrimA(clamped); else setTrimB(clamped);
+      return;
+    }
     if (side === "A") setTrimA(clamped); else setTrimB(clamped);
     const normalized = crossfader / 100;
     const angle = normalized * Math.PI / 2;
@@ -357,6 +368,11 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     try {
       const mixed = await playerController.mixToTrack(deckB, transitionSec * 1000);
       if (mixed) {
+        // mixToTrack resolves as soon as Rust starts the fade. Stay locked until it finishes,
+        // or a crossfader/trim move mid-fade fights the native ramp.
+        await new Promise((resolve) => window.setTimeout(resolve, transitionSec * 1000 + 150));
+        setDeckMixVolumes([1, 0]);
+        void playerController.setDjDeckVolumes(1, 0);
         setCrossfader(0);
         setDeckB(null);
         setDeckBPlaying(false);
@@ -454,6 +470,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             min={0}
             max={100}
             value={crossfader}
+            disabled={isMixing}
             onChange={(event) => applyCrossfader(Number(event.target.value))}
             className="w-full accent-[var(--color-primary)]"
           />
