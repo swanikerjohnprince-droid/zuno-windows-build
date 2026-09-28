@@ -156,6 +156,8 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     session.queue[session.queueIndex + 1] ?? session.queue.find((track) => track.id !== session.currentTrack?.id) ?? null,
   );
   const [crossfader, setCrossfader] = useState(0);
+  // Remember the actual mixer levels so loading/starting Deck A never overwrites Deck B.
+  const [deckMixVolumes, setDeckMixVolumes] = useState<[number, number]>([1, 0]);
   const [deckBPlaying, setDeckBPlaying] = useState(false);
   const [deckBDuration, setDeckBDuration] = useState(0);
   const [deckBPosition, setDeckBPosition] = useState(0);
@@ -193,6 +195,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
 
   // Start with a known mixer state whenever DJ/Split Mode mounts.
   useEffect(() => {
+    setDeckMixVolumes([1, 0]);
     void playerController.setDjDeckVolumes(1, 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playerController]);
@@ -272,6 +275,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     const normalized = Math.max(0, Math.min(100, value)) / 100;
     setCrossfader(value);
     const [volumeA, volumeB] = deckVolumes(normalized);
+    setDeckMixVolumes([volumeA, volumeB]);
     void playerController.setDjDeckVolumes(volumeA, volumeB);
 
     // Like a professional DJ app, moving toward a silent prepared deck can start that deck.
@@ -293,6 +297,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     const angle = normalized * Math.PI / 2;
     const volumeA = Math.max(0, Math.min(1, Math.cos(angle) * (side === "A" ? clamped : trimA)));
     const volumeB = Math.max(0, Math.min(1, Math.sin(angle) * (side === "B" ? clamped : trimB)));
+    setDeckMixVolumes([volumeA, volumeB]);
     void playerController.setDjDeckVolumes(volumeA, volumeB);
   };
 
@@ -302,7 +307,8 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
       return;
     }
     await playerController.play();
-    const [volumeA, volumeB] = deckVolumes(crossfader / 100);
+    // Preserve Deck B's live level when a new Deck A track is started.
+    const [volumeA, volumeB] = deckMixVolumes;
     void playerController.setDjDeckVolumes(volumeA, volumeB);
   };
 
@@ -317,6 +323,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
       return;
     }
     const [, volumeB] = deckVolumes(crossfader / 100);
+    setDeckMixVolumes((current) => [current[0], volumeB]);
     const started = await playerController.playCuedTrack(deckB, volumeB);
     if (started) {
       setDeckBPlaying(true);
@@ -423,6 +430,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
                 void playerController.seekCuedTrack(deckB, value);
                 if (deckBPlaying) setDeckBStartedAt(Date.now() - value * 1000);
                 const [volumeA, volumeB] = deckVolumes(crossfader / 100);
+                setDeckMixVolumes([volumeA, volumeB]);
                 void playerController.setDjDeckVolumes(volumeA, volumeB);
               }
             }}
