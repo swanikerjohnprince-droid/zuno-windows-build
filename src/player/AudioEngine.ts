@@ -235,6 +235,8 @@ export class AudioEngine {
   private rustTrackId: string | null = null;
   /** What Rust has decoded on the standby deck, mirrored so `hasPreloaded` stays synchronous. */
   private rustStandbyTrackId: string | null = null;
+  /** True while DJ Mode / Split Mode owns a live Deck B on the standby deck. */
+  private djDeckActive = false;
   private rustDurationSec = 0;
   private rustStandbyDurationSec = 0;
   /**
@@ -306,6 +308,11 @@ export class AudioEngine {
 
   usesRustAudio(): boolean {
     return this.useRustAudio;
+  }
+
+  /** See `djDeckActive`; called through `PlayerController.setDjDeckActive`. */
+  setDjDeckActive(active: boolean): void {
+    this.djDeckActive = active;
   }
 
   async loadTrack(
@@ -1054,7 +1061,7 @@ export class AudioEngine {
 
     // Dropping the standby first: it holds a decoded song, and a load that is not a transition
     // means whatever was queued behind the old track is no longer next.
-    if (this.rustStandbyTrackId) {
+    if (this.rustStandbyTrackId && !this.djDeckActive) {
       this.rustStandbyTrackId = null;
       this.rustStandbyDurationSec = 0;
       await rustAudio.dropStandby().catch(() => {});
