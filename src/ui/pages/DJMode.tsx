@@ -21,6 +21,43 @@ interface DJModeProps {
   onClose: () => void;
 }
 
+function DeckTrackText({ title, subtitle }: { title: string; subtitle: string }) {
+  const titleRef = useRef<HTMLDivElement>(null);
+  const [titleOverflows, setTitleOverflows] = useState(false);
+
+  useEffect(() => {
+    const element = titleRef.current;
+    if (!element) return;
+
+    const measure = () => setTitleOverflows(element.scrollWidth > element.clientWidth + 1);
+    measure();
+
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [title]);
+
+  return (
+    <>
+      <style>{`
+        @keyframes zunoDjDeckTitleScroll {
+          0%, 12% { transform: translateX(0); }
+          88%, 100% { transform: translateX(calc(-100% + 100%)); }
+        }
+        .zuno-dj-deck-title-scroll {
+          animation: zunoDjDeckTitleScroll 8s ease-in-out infinite alternate;
+          width: max-content;
+          min-width: 100%;
+        }
+      `}</style>
+      <div ref={titleRef} className="min-w-0 overflow-hidden text-lg font-semibold" title={title}>
+        <div className={cn(titleOverflows && "zuno-dj-deck-title-scroll")}>{title}</div>
+      </div>
+      <div className="truncate text-xs text-muted-foreground" title={subtitle}>{subtitle}</div>
+    </>
+  );
+}
+
 function formatTime(seconds: number) {
   const value = Math.max(0, Math.floor(seconds));
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
