@@ -21,50 +21,6 @@ interface DJModeProps {
   onClose: () => void;
 }
 
-function DeckTrackText({ title, subtitle }: { title: string; subtitle: string }) {
-  const titleRef = useRef<HTMLDivElement>(null);
-  const [titleOverflowPx, setTitleOverflowPx] = useState(0);
-
-  useEffect(() => {
-    const element = titleRef.current;
-    if (!element) return;
-
-    const measure = () => {
-      setTitleOverflowPx(Math.max(0, element.scrollWidth - element.clientWidth));
-    };
-    measure();
-
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [title]);
-
-  return (
-    <>
-      <style>{`
-        @keyframes zunoDjDeckTitleScroll {
-          0%, 12% { transform: translateX(0); }
-          88%, 100% { transform: translateX(calc(var(--zuno-dj-title-overflow) * -1)); }
-        }
-        .zuno-dj-deck-title-scroll {
-          animation: zunoDjDeckTitleScroll 8s ease-in-out infinite alternate;
-          width: max-content;
-          min-width: 100%;
-        }
-      `}</style>
-      <div ref={titleRef} className="min-w-0 overflow-hidden text-lg font-semibold" title={title}>
-        <div
-          className={cn(titleOverflowPx > 0 && "zuno-dj-deck-title-scroll")}
-          style={{ "--zuno-dj-title-overflow": `${titleOverflowPx}px` } as React.CSSProperties}
-        >
-          {title}
-        </div>
-      </div>
-      <div className="truncate text-xs text-muted-foreground" title={subtitle}>{subtitle}</div>
-    </>
-  );
-}
-
 function formatTime(seconds: number) {
   const value = Math.max(0, Math.floor(seconds));
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
@@ -120,12 +76,8 @@ function Deck({
       <div className="mb-4 flex items-center justify-between">
         <div>
           <div className="text-[10px] font-bold tracking-[0.22em] text-primary">DECK {side}</div>
-          <div className="mt-1 min-w-0">
-            <DeckTrackText
-              title={track?.title ?? "Load a track"}
-              subtitle={track?.artist ?? "Choose a song from the library"}
-            />
-          </div>
+          <div className="mt-1 truncate text-lg font-semibold">{track?.title ?? "Load a track"}</div>
+          <div className="truncate text-xs text-muted-foreground">{track?.artist ?? "Choose a song from the library"}</div>
         </div>
         <div className="flex items-center gap-3 text-[10px] font-semibold text-muted-foreground">
           <label className="flex items-center gap-1.5">
@@ -296,16 +248,6 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     }, 80);
     return () => window.clearInterval(timer);
   }, [deckBPlaying, deckBStartedAt, durationB]);
-
-  // Hot cues belong to the track, not the deck slot. Clear them whenever a different
-  // track is loaded so cue points from the previous song cannot be reused accidentally.
-  useEffect(() => {
-    setHotCuesA([null, null, null, null]);
-  }, [deckA?.id]);
-
-  useEffect(() => {
-    setHotCuesB([null, null, null, null]);
-  }, [deckB?.id]);
 
   // Prepare Deck B whenever the selection changes.
   useEffect(() => {
@@ -498,11 +440,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             trim={trimB}
             onPlay={() => void playB()}
             onCue={() => {
-              if (!deckB) return;
-              const time = hotCuesB[0] ?? 0;
-              setDeckBPosition(time);
-              void playerController.seekCuedTrack(deckB, time);
-              if (deckBPlaying) setDeckBStartedAt(Date.now() - time * 1000);
+              if (deckB) void playerController.cueTrack(deckB);
             }}
             onSeek={(value) => {
               setDeckBPosition(value);
@@ -601,9 +539,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
                   <span className="block truncate text-xs font-medium">{track.title}</span>
                   <span className="block truncate text-[10px] text-muted-foreground">{track.artist}</span>
                 </span>
-                <span className="text-[9px] font-bold text-muted-foreground">
-                  {deckA?.id === track.id ? (session.status === "playing" ? "PLAYING" : "LOADED") : "LOAD"}
-                </span>
+                <span className="text-[9px] font-bold text-muted-foreground">{deckA?.id === track.id ? "PLAYING" : "LOAD"}</span>
               </button>
             ))}
             {!session.queue.length && <div className="py-6 text-center text-xs text-muted-foreground">Add tracks to the main Zuno queue.</div>}

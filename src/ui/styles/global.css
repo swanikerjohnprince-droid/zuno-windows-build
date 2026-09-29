@@ -18,7 +18,7 @@
 
 /*
  * Design tokens consumed by the vendored beUI components.
- * Neutral shadcn surfaces, with the app's #00CCCC kept as `primary` (accent only).
+ * Neutral shadcn surfaces, with the app's #ff0033 kept as `primary` (accent only).
  *
  * The UI is borderless: surfaces are separated by background contrast, not outlines.
  * `--color-border` / `--color-input` are kept only because beUI component internals
@@ -37,12 +37,8 @@
   --color-muted-foreground: oklch(0.708 0 0);
 
   /* Brand accent — the one colour carried over from the old identity. */
-  --color-primary: #00cccc;
-  /*
-   * White-on-#00CCCC does not have sufficient contrast; near-black text keeps the primary
-   * control text readable in both themes.
-   */
-  --color-primary-foreground: oklch(0.145 0 0);
+  --color-primary: #ff0033;
+  --color-primary-foreground: oklch(0.985 0 0);
 
   --color-secondary: oklch(0.269 0 0);
   --color-secondary-foreground: oklch(0.985 0 0);
@@ -52,7 +48,7 @@
 
   --color-border: oklch(1 0 0 / 10%);
   --color-input: oklch(1 0 0 / 15%);
-  --color-ring: #00cccc;
+  --color-ring: #ff0033;
  
 }
 
@@ -78,8 +74,8 @@
  * Light theme. The @theme block above is the dark default; this flips the same token
  * names, so every component follows without knowing a theme exists.
  *
- * `--color-primary` stays #00CCCC in both — it is the brand accent, not a surface.
- * Contrast is tuned for near-black text on primary in both themes.
+ * `--color-primary` stays #ff0033 in both — it is the brand accent, not a surface.
+ * Contrast is tuned for white text on primary in dark and near-black text elsewhere.
  */
 html[data-theme="light"] {
   /*
