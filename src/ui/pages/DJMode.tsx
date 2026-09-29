@@ -23,13 +23,15 @@ interface DJModeProps {
 
 function DeckTrackText({ title, subtitle }: { title: string; subtitle: string }) {
   const titleRef = useRef<HTMLDivElement>(null);
-  const [titleOverflows, setTitleOverflows] = useState(false);
+  const [titleOverflowPx, setTitleOverflowPx] = useState(0);
 
   useEffect(() => {
     const element = titleRef.current;
     if (!element) return;
 
-    const measure = () => setTitleOverflows(element.scrollWidth > element.clientWidth + 1);
+    const measure = () => {
+      setTitleOverflowPx(Math.max(0, element.scrollWidth - element.clientWidth));
+    };
     measure();
 
     const observer = new ResizeObserver(measure);
@@ -42,7 +44,7 @@ function DeckTrackText({ title, subtitle }: { title: string; subtitle: string })
       <style>{`
         @keyframes zunoDjDeckTitleScroll {
           0%, 12% { transform: translateX(0); }
-          88%, 100% { transform: translateX(calc(-100% + 100%)); }
+          88%, 100% { transform: translateX(calc(var(--zuno-dj-title-overflow) * -1)); }
         }
         .zuno-dj-deck-title-scroll {
           animation: zunoDjDeckTitleScroll 8s ease-in-out infinite alternate;
@@ -51,7 +53,12 @@ function DeckTrackText({ title, subtitle }: { title: string; subtitle: string })
         }
       `}</style>
       <div ref={titleRef} className="min-w-0 overflow-hidden text-lg font-semibold" title={title}>
-        <div className={cn(titleOverflows && "zuno-dj-deck-title-scroll")}>{title}</div>
+        <div
+          className={cn(titleOverflowPx > 0 && "zuno-dj-deck-title-scroll")}
+          style={{ "--zuno-dj-title-overflow": `${titleOverflowPx}px` } as React.CSSProperties}
+        >
+          {title}
+        </div>
       </div>
       <div className="truncate text-xs text-muted-foreground" title={subtitle}>{subtitle}</div>
     </>
