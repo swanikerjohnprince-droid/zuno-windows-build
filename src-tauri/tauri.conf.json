@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Zuno DJ",
+  "productName": "ZUNO DJ",
   "version": "1.4.0",
-  "identifier": "com.zuno.desktop",
+  "identifier": "com.zuno.dj",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
