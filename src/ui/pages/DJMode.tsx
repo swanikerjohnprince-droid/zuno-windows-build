@@ -120,8 +120,12 @@ function Deck({
       <div className="mb-4 flex items-center justify-between">
         <div>
           <div className="text-[10px] font-bold tracking-[0.22em] text-primary">DECK {side}</div>
-          <div className="mt-1 truncate text-lg font-semibold">{track?.title ?? "Load a track"}</div>
-          <div className="truncate text-xs text-muted-foreground">{track?.artist ?? "Choose a song from the library"}</div>
+          <div className="mt-1 min-w-0">
+            <DeckTrackText
+              title={track?.title ?? "Load a track"}
+              subtitle={track?.artist ?? "Choose a song from the library"}
+            />
+          </div>
         </div>
         <div className="flex items-center gap-3 text-[10px] font-semibold text-muted-foreground">
           <label className="flex items-center gap-1.5">
