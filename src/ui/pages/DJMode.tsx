@@ -249,6 +249,16 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     return () => window.clearInterval(timer);
   }, [deckBPlaying, deckBStartedAt, durationB]);
 
+  // Hot cues belong to the track, not the deck slot. Clear them whenever a different
+  // track is loaded so cue points from the previous song cannot be reused accidentally.
+  useEffect(() => {
+    setHotCuesA([null, null, null, null]);
+  }, [deckA?.id]);
+
+  useEffect(() => {
+    setHotCuesB([null, null, null, null]);
+  }, [deckB?.id]);
+
   // Prepare Deck B whenever the selection changes.
   useEffect(() => {
     if (!deckB) return;
@@ -440,7 +450,11 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             trim={trimB}
             onPlay={() => void playB()}
             onCue={() => {
-              if (deckB) void playerController.cueTrack(deckB);
+              if (!deckB) return;
+              const time = hotCuesB[0] ?? 0;
+              setDeckBPosition(time);
+              void playerController.seekCuedTrack(deckB, time);
+              if (deckBPlaying) setDeckBStartedAt(Date.now() - time * 1000);
             }}
             onSeek={(value) => {
               setDeckBPosition(value);
@@ -539,7 +553,9 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
                   <span className="block truncate text-xs font-medium">{track.title}</span>
                   <span className="block truncate text-[10px] text-muted-foreground">{track.artist}</span>
                 </span>
-                <span className="text-[9px] font-bold text-muted-foreground">{deckA?.id === track.id ? "PLAYING" : "LOAD"}</span>
+                <span className="text-[9px] font-bold text-muted-foreground">
+                  {deckA?.id === track.id ? (session.status === "playing" ? "PLAYING" : "LOADED") : "LOAD"}
+                </span>
               </button>
             ))}
             {!session.queue.length && <div className="py-6 text-center text-xs text-muted-foreground">Add tracks to the main Zuno queue.</div>}
