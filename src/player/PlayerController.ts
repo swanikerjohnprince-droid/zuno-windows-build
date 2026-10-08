@@ -1535,14 +1535,16 @@ export class PlayerController {
   }
 
   /**
-   * Full-track peaks (0-255, `buckets` of them) for DJ Mode's waveform, or null when this track
-   * has none to give: not on the Rust engine, or not on disk yet.
+   * Full-track peaks (0-255, `buckets` of them) for DJ Mode's waveform, or null when none can be
+   * produced right now: not on the Rust engine, or a streaming track that is not loaded onto a
+   * deck yet (so there is no downloaded data to analyse). A null is never cached, so asking
+   * again once the track is playing works.
    *
-   * The source is built here from what is already known locally instead of going through
-   * `getStreamData`, because for a track that is only streaming that call resolves a signed
-   * network URL — real work and a real request — purely so the Rust side can refuse it.
-   * Streaming tracks get null and the UI says so, rather than showing a made-up shape.
-   * Results are cached per track and bucket count; concurrent callers share one decode.
+   * A downloaded or local track is analysed from disk. A streaming one is analysed from the
+   * buffer its own playback is already filling — no second download, which would have to queue
+   * behind (and delay) the next real play or collide with a playing track's fill. See
+   * `STREAM_BUFFERS` in lib.rs. Results are cached per track and bucket count; concurrent
+   * callers share one decode.
    */
   async getWaveform(track: Track, buckets: number): Promise<Uint8Array | null> {
     if (!this.audioEngine.usesRustAudio()) return null;
@@ -1558,16 +1560,15 @@ export class PlayerController {
     } else if (isTrackDownloaded(track.id)) {
       source = { kind: "offline", trackId: track.id, mimeType: track.mimeType ?? "audio/mp4" };
     }
-    if (!source) return null;
 
     const job = rustAudio
-      .waveform(source, buckets)
+      .waveform(track.id, source, buckets)
       .then((peaks) => {
         this.waveformCache.set(key, peaks);
         return peaks;
       })
       .catch((error: unknown) => {
-        logInternalWarn("PlayerController.getWaveform failed", {
+        logInternalWarn("PlayerController.getWaveform unavailable", {
           trackId: track.id,
           error: error instanceof Error ? error.message : String(error),
         });
@@ -1583,7 +1584,6 @@ export class PlayerController {
   /** Starts a track already decoded on the standby DJ deck without swapping active ownership. */
   async playCuedTrack(track: Track, volume = 0): Promise<boolean> {
     if (!this.audioEngine.usesRustAudio()) return false;
-
     const ready = this.audioEngine.hasPreloaded(track.id) || await this.cueTrack(track);
     if (!ready) return false;
     return this.audioEngine.playPreloaded(track.id, volume);
