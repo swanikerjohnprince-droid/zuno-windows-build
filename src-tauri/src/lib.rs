@@ -3198,6 +3198,41 @@ const PLAYBACK_RETRY_BACKOFF: Duration = Duration::from_millis(250);
  */
 static LOAD_GENERATION: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
+/**
+ * The streaming buffer behind each track currently (or recently) loaded, held weakly.
+ *
+ * A waveform needs every byte of the song, and a track that is playing or cued on a deck has
+ * already fetched exactly that into its `MediaBuffer`. Reading the same buffer through a second
+ * `BufferReader` costs no network at all — which matters, because the alternative (fetching the
+ * song again for analysis) would have to go through `PLAYBACK_FILL_LOCK`: googlevideo refuses
+ * concurrent ranges on one session, so a second download would either queue behind, and delay,
+ * the next real play, or race a playing track's fill and kill it, which is the exact failure
+ * that lock exists to prevent.
+ *
+ * Weak on purpose: the deck's decoder is what keeps a buffer alive, and this map must never
+ * be the reason a finished track's audio stays in memory. Dead entries are swept on insert.
+ * Keyed by track id, so a track loaded twice resolves to the most recent load.
+ */
+static STREAM_BUFFERS: OnceLock<Mutex<HashMap<String, (std::sync::Weak<Mutex<MediaBuffer>>, String)>>> =
+    OnceLock::new();
+
+fn stream_buffers() -> &'static Mutex<HashMap<String, (std::sync::Weak<Mutex<MediaBuffer>>, String)>> {
+    STREAM_BUFFERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_stream_buffer(track_id: &str, buffer: &Arc<Mutex<MediaBuffer>>, mime_type: &str) {
+    if let Ok(mut map) = stream_buffers().lock() {
+        map.retain(|_, (weak, _)| weak.strong_count() > 0);
+        map.insert(track_id.to_string(), (Arc::downgrade(buffer), mime_type.to_string()));
+    }
+}
+
+fn find_stream_buffer(track_id: &str) -> Option<(Arc<Mutex<MediaBuffer>>, String)> {
+    let map = stream_buffers().lock().ok()?;
+    let (weak, mime_type) = map.get(track_id)?;
+    Some((weak.upgrade()?, mime_type.clone()))
+}
+
 /// True once a fill's slot has moved on to a newer load. `None` opts out, for the media-server
 /// (`<audio>`) path, which has no load slots to be superseded in.
 fn load_superseded(slot: Option<(usize, u64)>) -> bool {
@@ -4102,6 +4137,7 @@ fn open_native_audio_reader(
                 ranges,
                 Some((slot_index, generation)),
             ));
+            register_stream_buffer(track_id, &buffer, &mime_type);
             Ok(NativeAudioReader {
                 reader: Box::new(audio::BufferReader::new(Arc::clone(&buffer))),
                 mime_type,
@@ -4317,35 +4353,37 @@ where
 }
 
 /**
- * Full-track peaks for a waveform display, computed once by decoding the whole file and
- * downmixing to mono. Deliberately narrower than `native_audio_load`: only for sources whose
- * bytes are already entirely on disk (`Offline`, `File`), not `Stream`.
+ * Full-track peaks for a waveform display: the whole song decoded once, `buckets` peaks across
+ * its length. Works for every kind of source, and never downloads anything extra:
  *
- * A `Stream` source needs `native_audio_load`'s `MediaBuffer`/`fill_media_buffer` machinery to
- * start playing before the whole file has arrived — real value for playback, no matching value
- * for a one-shot analysis that has to read the entire track before it can return anything
- * anyway. Reusing that machinery here would mean either duplicating its fill/health/generation
- * bookkeeping or bolting an unrelated consumer onto it blind; both were the wrong trade for a
- * feature with a legitimate, honest fallback on the frontend — "waveform available once this
- * track is downloaded" — instead of a half-verified attempt at the streaming case.
+ * - `Offline` / `File`: read straight from disk.
+ * - streaming (`Stream`, or no source at all): read from the buffer the track's own playback
+ *   fetch is filling — see `STREAM_BUFFERS` for why a second download is the wrong tool. If the
+ *   track has not been loaded onto a deck yet, this waits briefly for it to appear rather than
+ *   failing at once, because DJ Mode asks for Deck B's waveform in the same breath as it cues it.
  *
- * `buckets` is how many peaks to return; the frontend picks it to match how many bars it can
- * usefully draw. No duration is taken from the caller or the container: Opus in WebM usually
- * declares none and provider metadata can be off by seconds, so the bucket boundaries come from
- * how many frames were actually decoded instead (see `accumulate_peaks`).
+ * No duration is taken from the caller or the container: Opus in WebM usually declares none and
+ * provider metadata can be off by seconds, so the bucket boundaries come from how many frames
+ * were actually decoded instead (see `accumulate_peaks`).
  */
 #[tauri::command]
 async fn native_audio_waveform(
     app: tauri::AppHandle,
-    source: NativeAudioSource,
+    track_id: String,
+    source: Option<NativeAudioSource>,
     buckets: usize,
 ) -> Result<Vec<u8>, CommandError> {
+    enum Input {
+        Disk(PathBuf, String),
+        Stream(Arc<Mutex<MediaBuffer>>, String),
+    }
+
     let buckets = buckets.clamp(8, 4096);
-    let (path, mime_type) = match source {
-        NativeAudioSource::Offline { track_id, mime_type } => {
-            (offline_entry_path(&app, &track_id)?, mime_type)
+    let input = match source {
+        Some(NativeAudioSource::Offline { track_id, mime_type }) => {
+            Input::Disk(offline_entry_path(&app, &track_id)?, mime_type)
         }
-        NativeAudioSource::File { path } => {
+        Some(NativeAudioSource::File { path }) => {
             let path = PathBuf::from(path);
             // Re-validated rather than trusted from the frontend, same trust boundary as
             // `open_native_audio_reader`'s own `File` branch.
@@ -4353,21 +4391,48 @@ async fn native_audio_waveform(
                 return Err(cache_error("local audio file is unavailable."));
             }
             let declared = local_audio_mime_type(&path).to_string();
-            (path, declared)
+            Input::Disk(path, declared)
         }
-        NativeAudioSource::Stream { .. } => {
-            return Err(cache_error("waveform is only available for downloaded audio."));
+        Some(NativeAudioSource::Stream { .. }) | None => {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            loop {
+                if let Some((buffer, mime_type)) = find_stream_buffer(&track_id) {
+                    break Input::Stream(buffer, mime_type);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(cache_error("waveform: track is not loaded yet."));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
         }
     };
 
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, CommandError> {
         use rodio::Source as _;
 
-        let mut probe = File::open(&path)
-            .map_err(|error| cache_error(format!("waveform read failed: {error}")))?;
-        let label = path.file_name().and_then(|name| name.to_str()).unwrap_or("file");
-        let mime_type = sniffed_mime(&mut probe, mime_type, label);
-        let reader: Box<dyn symphonia::core::io::MediaSource> = Box::new(probe);
+        let (reader, mime_type, buffer): (
+            Box<dyn symphonia::core::io::MediaSource>,
+            String,
+            Option<Arc<Mutex<MediaBuffer>>>,
+        ) = match input {
+            Input::Disk(path, declared) => {
+                let mut probe = File::open(&path)
+                    .map_err(|error| cache_error(format!("waveform read failed: {error}")))?;
+                let label = path.file_name().and_then(|name| name.to_str()).unwrap_or("file");
+                let mime_type = sniffed_mime(&mut probe, declared, label);
+                (
+                    Box::new(probe) as Box<dyn symphonia::core::io::MediaSource>,
+                    mime_type,
+                    None,
+                )
+            }
+            Input::Stream(buffer, mime_type) => (
+                Box::new(audio::BufferReader::new(Arc::clone(&buffer)))
+                    as Box<dyn symphonia::core::io::MediaSource>,
+                mime_type,
+                Some(buffer),
+            ),
+        };
 
         let (peaks, frames) = if opus_source::is_opus(&mime_type) {
             let decoded = opus_source::OpusSource::new(reader, &mime_type)
@@ -4381,6 +4446,28 @@ async fn native_audio_waveform(
 
         if frames == 0 {
             return Err(cache_error("waveform: no audio decoded."));
+        }
+
+        // A streamed track's reader reports a failed or stalled download as end-of-file, so a
+        // decode that "succeeded" may only be the first half of the song. Drawing that
+        // stretched across the whole width would be a confident, wrong waveform — worse than
+        // none — so the buffer has to be provably complete. The decoder can finish a little
+        // before the last chunk lands, so allow a few seconds for that, not for a real failure.
+        if let Some(buffer) = buffer {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let (complete, failed) = match buffer.lock() {
+                    Ok(guard) => (guard.contiguous_len() >= guard.total, guard.failed),
+                    Err(_) => return Err(cache_error("waveform: audio buffer unavailable.")),
+                };
+                if complete {
+                    break;
+                }
+                if failed || std::time::Instant::now() >= deadline {
+                    return Err(cache_error("waveform: the audio did not finish downloading."));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
         }
 
         // Normalized against this track's own loudest peak rather than a fixed ceiling — a
@@ -5585,7 +5672,6 @@ pub fn run() {
             native_audio_play,
             native_audio_pause,
             native_audio_stop,
-
             native_audio_seek,
             native_audio_set_volume,
             native_audio_set_rate,
@@ -5699,6 +5785,45 @@ mod tests {
      * compiled and every other check passed. The payloads below are copied from the invoke
      * calls; keep them that way.
      */
+    /**
+     * `native_audio_waveform` takes the source as optional: a streaming track has nothing to
+     * point at on disk, so the frontend sends `null` and the Rust side finds the track's own
+     * buffer by id. `null` must read as "no source", not as a parse failure.
+     */
+    #[test]
+    fn waveform_source_is_optional_on_the_wire() {
+        let none = serde_json::from_str::<Option<NativeAudioSource>>("null").expect("null source");
+        assert!(none.is_none());
+        let some = serde_json::from_str::<Option<NativeAudioSource>>(
+            r#"{"kind":"offline","trackId":"abc","mimeType":"audio/mp4"}"#,
+        )
+        .expect("offline source");
+        assert!(matches!(some, Some(NativeAudioSource::Offline { .. })));
+    }
+
+    /**
+     * The registry holds buffers weakly, so a finished track's audio is freed by its deck and
+     * not kept alive by the waveform lookup — and a lookup after that must come back empty
+     * rather than resurrecting anything.
+     */
+    #[test]
+    fn stream_buffer_registry_does_not_keep_buffers_alive() {
+        let buffer = Arc::new(Mutex::new(MediaBuffer::complete(vec![1, 2, 3])));
+        super::register_stream_buffer("registry-test-track", &buffer, "audio/mp4");
+
+        let (found, mime) = super::find_stream_buffer("registry-test-track").expect("registered");
+        assert_eq!(mime, "audio/mp4");
+        assert!(Arc::ptr_eq(&found, &buffer));
+        drop(found);
+
+        drop(buffer);
+        assert!(
+            super::find_stream_buffer("registry-test-track").is_none(),
+            "the registry must not be what keeps a dropped buffer alive"
+        );
+        assert!(super::find_stream_buffer("never-registered").is_none());
+    }
+
     #[test]
     fn native_audio_source_parses_what_the_frontend_sends() {
         let stream = serde_json::from_str::<NativeAudioSource>(
