@@ -112,17 +112,21 @@ const WAVEFORM_HEIGHT = 80;
 type WaveformStatus = "empty" | "loading" | "ready" | "unavailable";
 
 /**
- * Real peaks for a deck's track, decoded once in Rust and cached by the controller. Anything
- * that isn't on disk yet (a pure stream) comes back as "unavailable" — shown as such, never as
- * a generated stand-in shape, because a made-up waveform is worse than none: a DJ reads breaks
- * and drops off it.
+ * Real peaks for a deck's track, decoded once in Rust and cached by the controller. Streaming
+ * tracks are analysed from the buffer their own playback is filling, so they only have a
+ * waveform once they are actually loaded onto a deck — `retryKey` is how a deck says "that has
+ * changed, ask again" (Deck A flips it when playback starts; Deck B when it is played). A track
+ * with no peaks to give is shown as having none, never as a generated stand-in shape, because a
+ * made-up waveform is worse than none: a DJ reads breaks and drops off it.
  */
-function useWaveform(playerController: PlayerControllerActions, track: Track | null) {
+function useWaveform(playerController: PlayerControllerActions, track: Track | null, retryKey: boolean) {
   const [result, setResult] = useState<{ id: string | null; peaks: Uint8Array | null; status: WaveformStatus }>({
     id: null,
     peaks: null,
     status: "empty",
   });
+  const resultRef = useRef(result);
+  resultRef.current = result;
   const trackId = track?.id ?? null;
 
   useEffect(() => {
@@ -130,6 +134,8 @@ function useWaveform(playerController: PlayerControllerActions, track: Track | n
       setResult({ id: null, peaks: null, status: "empty" });
       return;
     }
+    // Already drawn for this track: a retry signal must not blank a working waveform.
+    if (resultRef.current.id === track.id && resultRef.current.status === "ready") return;
     let cancelled = false;
     setResult({ id: track.id, peaks: null, status: "loading" });
     void playerController.getWaveform(track, WAVEFORM_BUCKETS).then((peaks) => {
@@ -141,7 +147,7 @@ function useWaveform(playerController: PlayerControllerActions, track: Track | n
     };
     // Keyed on the id: a new Track object for the same song must not trigger a second decode.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trackId, playerController]);
+  }, [trackId, retryKey, playerController]);
 
   // A result for the previous track must never draw under the new one for even one frame.
   return result.id === trackId ? result : { id: trackId, peaks: null, status: (trackId ? "loading" : "empty") as WaveformStatus };
@@ -279,7 +285,7 @@ function Waveform({
             )}
           >
             {status === "loading" && "Analysing waveform…"}
-            {status === "unavailable" && "Waveform appears once this track is downloaded"}
+            {status === "unavailable" && "Waveform not ready — it appears once the track has loaded"}
           </div>
         </>
       )}
@@ -329,13 +335,19 @@ function Deck({
 
   return (
     <section className="min-w-0 flex-1 rounded-2xl bg-card/80 p-4 shadow-2xl shadow-black/20">
-      <div className="mb-4 flex items-center justify-between">
-        <div>
+      <div className="mb-4 flex items-center justify-between gap-3">
+        {/*
+          min-w-0 is what lets ScrollingText ever see an overflow: a flex item will not shrink
+          below the width of its content, and until the title is known to overflow it is still
+          laid out in flow — so without this the column just grows to the full title, nothing
+          overflows, nothing scrolls, and the header pushes the TRIM/LOAD controls out instead.
+        */}
+        <div className="min-w-0">
           <div className="text-[10px] font-bold tracking-[0.22em] text-primary">DECK {side}</div>
           <ScrollingText className="mt-1 text-lg font-semibold">{track?.title ?? "Load a track"}</ScrollingText>
           <ScrollingText className="text-xs text-muted-foreground">{track?.artist ?? "Choose a song from the library"}</ScrollingText>
         </div>
-        <div className="flex items-center gap-3 text-[10px] font-semibold text-muted-foreground">
+        <div className="flex shrink-0 items-center gap-3 text-[10px] font-semibold text-muted-foreground">
           <label className="flex items-center gap-1.5">
             <span className="tracking-widest">TRIM</span>
             <input
@@ -470,11 +482,10 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   }, [playerController]);
 
   const deckA = session.currentTrack;
-  const waveformA = useWaveform(playerController, deckA);
-  const waveformB = useWaveform(playerController, deckB);
+  const waveformA = useWaveform(playerController, deckA, session.status === "playing");
+  const waveformB = useWaveform(playerController, deckB, deckBPlaying);
   const durationA = deckA?.durationSec ?? playerController.getDuration();
   const durationB = deckBDuration || deckB?.durationSec || 0;
-
 
   // The player store intentionally does not emit on every audio sample, so the DJ surface
   // keeps its own lightweight visual clock while the real audio engine remains the source of truth.
@@ -552,7 +563,6 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
       Math.max(0, Math.min(1, gainB * trimB)),
     ];
   };
-
 
   const applyCrossfader = (value: number) => {
     if (isMixing) return;
@@ -702,7 +712,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
 
       <div className="min-h-0 flex-1 overflow-auto p-4">
         <div className="mb-4 flex items-center gap-3">
-          <div className="flex-1 rounded-xl bg-white/5 px-4 py-3">
+          <div className="min-w-0 flex-1 rounded-xl bg-white/5 px-4 py-3">
             <div className="text-[10px] font-bold tracking-widest text-muted-foreground">DECK A</div>
             <ScrollingText className="text-sm font-bold">{deckA?.title ?? "No track playing"}</ScrollingText>
           </div>
@@ -710,7 +720,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             <div className="text-[10px] font-bold tracking-widest text-muted-foreground">CROSSFADER</div>
             <div className="text-xl font-bold">{Math.round(crossfader)}%</div>
           </div>
-          <div className="flex-1 rounded-xl bg-white/5 px-4 py-3 text-right">
+          <div className="min-w-0 flex-1 rounded-xl bg-white/5 px-4 py-3 text-right">
             <div className="text-[10px] font-bold tracking-widest text-muted-foreground">DECK B</div>
             <ScrollingText className="text-sm font-bold">{deckB?.title ?? "Load a track"}</ScrollingText>
           </div>
