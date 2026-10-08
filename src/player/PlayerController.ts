@@ -8,6 +8,7 @@ import { NavigationCoalescer } from "./navigationCoalescer";
 import { recordPlay } from "./playHistory";
 import { computeQueueWindow } from "./queueWindow";
 import { getOfflineTrack, isTrackDownloaded } from "./offlineStore";
+import * as rustAudio from "./rustAudio";
 import { hasPreloadDeck } from "./preloadDeck";
 import { getAudioEngineMode } from "../ui/settings/audioEngine";
 import { DiscordRpcService } from "./DiscordRPC";
@@ -178,6 +179,9 @@ export class PlayerController {
   private loadedTrackId: string | null = null;
   /** True while DJ/Split Mode owns a live standby deck. */
   private djDeckActive = false;
+  /** Finished peaks by track id, and in-flight decodes, so a re-render never decodes twice. */
+  private readonly waveformCache = new Map<string, Uint8Array>();
+  private readonly waveformInFlight = new Map<string, Promise<Uint8Array | null>>();
   private isTabActive = false;
   private playTrackRequestId = 0;
   private autoplayEnabled = false;
@@ -1530,9 +1534,56 @@ export class PlayerController {
     }
   }
 
+  /**
+   * Full-track peaks (0-255, `buckets` of them) for DJ Mode's waveform, or null when this track
+   * has none to give: not on the Rust engine, or not on disk yet.
+   *
+   * The source is built here from what is already known locally instead of going through
+   * `getStreamData`, because for a track that is only streaming that call resolves a signed
+   * network URL — real work and a real request — purely so the Rust side can refuse it.
+   * Streaming tracks get null and the UI says so, rather than showing a made-up shape.
+   * Results are cached per track and bucket count; concurrent callers share one decode.
+   */
+  async getWaveform(track: Track, buckets: number): Promise<Uint8Array | null> {
+    if (!this.audioEngine.usesRustAudio()) return null;
+    const key = `${track.id}:${buckets}`;
+    const cached = this.waveformCache.get(key);
+    if (cached) return cached;
+    const pending = this.waveformInFlight.get(key);
+    if (pending) return pending;
+
+    let source: import("../datasource/types").RustAudioSource | null = null;
+    if (track.source === "local" && track.localPath) {
+      source = { kind: "file", path: track.localPath };
+    } else if (isTrackDownloaded(track.id)) {
+      source = { kind: "offline", trackId: track.id, mimeType: track.mimeType ?? "audio/mp4" };
+    }
+    if (!source) return null;
+
+    const job = rustAudio
+      .waveform(source, buckets)
+      .then((peaks) => {
+        this.waveformCache.set(key, peaks);
+        return peaks;
+      })
+      .catch((error: unknown) => {
+        logInternalWarn("PlayerController.getWaveform failed", {
+          trackId: track.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      })
+      .finally(() => {
+        this.waveformInFlight.delete(key);
+      });
+    this.waveformInFlight.set(key, job);
+    return job;
+  }
+
   /** Starts a track already decoded on the standby DJ deck without swapping active ownership. */
   async playCuedTrack(track: Track, volume = 0): Promise<boolean> {
     if (!this.audioEngine.usesRustAudio()) return false;
+
     const ready = this.audioEngine.hasPreloaded(track.id) || await this.cueTrack(track);
     if (!ready) return false;
     return this.audioEngine.playPreloaded(track.id, volume);

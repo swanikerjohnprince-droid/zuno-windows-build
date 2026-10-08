@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Track } from "../../datasource/types";
 import type { PlayerControllerActions } from "../../player/playerStore";
 import type { PlayerSession } from "../../player/PlayerController";
@@ -15,6 +15,40 @@ const DEFAULT_TRANSITION_SEC = 4;
 const MIN_TRIM = 0.5;
 const MAX_TRIM = 1.5;
 
+/**
+ * The crossfader's constant-power curve, ported from Mixxx's `EngineXfader::getXfadeGains`
+ * (src/engine/enginexfader.cpp, GPL-2.0) at its default "transform" of 1.0 — Mixxx exposes that
+ * as a "hold time" tuning knob per mixer profile; this fixes it at their default rather than
+ * adding a second slider on top of TRANSITION and TRIM.
+ *
+ * The plain `cos`/`sin` law used before is also constant-power (gain² always sums to 1), but
+ * it's a pure trig derivation. Mixxx's is instead the result of measuring against real mixed
+ * audio: their source comment says they tested 30-second clips across genres with ReplayGain 2.0
+ * analysis and tuned the curve to that, rather than to the trigonometric ideal. The two land in
+ * the same place at the ends and at center, and differ in between — Mixxx's cuts each side a
+ * little harder approaching center.
+ */
+function xfadeGains(normalizedAtoB: number): [gainA: number, gainB: number] {
+  // Mixxx's own coordinate space is -1 (hard left) .. +1 (hard right); map our 0..1 (A..B) onto it.
+  const position = Math.max(0, Math.min(1, normalizedAtoB)) * 2 - 1;
+  const powerCalibration = 0.5; // pow(0.5, 1 / transform) with transform = 1.0
+  const scaled = position * powerCalibration;
+  const left = scaled - powerCalibration;
+  const right = scaled + powerCalibration;
+
+  let gainA = right > 0 ? 1 - right : 1;
+  let gainB = left < 0 ? 1 - Math.abs(left) : 1;
+  gainA = Math.max(0, gainA);
+  gainB = Math.max(0, gainB);
+
+  // Pins the pair onto gainA + gainB == 1 before the sqrt step below turns that linear pair
+  // into a constant-power one — same order of operations as the source, not simplifiable to
+  // "normalize first" without changing the curve's shape near the clipped ends.
+  if (gainA > gainB) gainB = 1 - gainA; else gainA = 1 - gainB;
+  const norm = Math.sqrt(gainA * gainA + gainB * gainB) || 1;
+  return [gainA / norm, gainB / norm];
+}
+
 interface DJModeProps {
   session: PlayerSession;
   playerController: PlayerControllerActions;
@@ -26,14 +60,189 @@ function formatTime(seconds: number) {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
 }
 
-function buildWave(seed: string, count = 180, phase = 0) {
-  let n = 0;
-  for (let i = 0; i < seed.length; i++) n = (n * 31 + seed.charCodeAt(i)) >>> 0;
-  return Array.from({ length: count }, (_, i) => {
-    n = (1664525 * n + 1013904223) >>> 0;
-    const pulse = Math.abs(Math.sin(i * 0.19 + (n % 100) / 30 + phase));
-    return 0.18 + ((n % 100) / 100) * 0.48 + pulse * 0.28;
+/** Peaks requested per track: enough for a crisp full-width overview at 2x pixel density. */
+const WAVEFORM_BUCKETS = 1024;
+const WAVEFORM_HEIGHT = 80;
+
+type WaveformStatus = "empty" | "loading" | "ready" | "unavailable";
+
+/**
+ * Real peaks for a deck's track, decoded once in Rust and cached by the controller. Anything
+ * that isn't on disk yet (a pure stream) comes back as "unavailable" — shown as such, never as
+ * a generated stand-in shape, because a made-up waveform is worse than none: a DJ reads breaks
+ * and drops off it.
+ */
+function useWaveform(playerController: PlayerControllerActions, track: Track | null) {
+  const [result, setResult] = useState<{ id: string | null; peaks: Uint8Array | null; status: WaveformStatus }>({
+    id: null,
+    peaks: null,
+    status: "empty",
   });
+  const trackId = track?.id ?? null;
+
+  useEffect(() => {
+    if (!track) {
+      setResult({ id: null, peaks: null, status: "empty" });
+      return;
+    }
+    let cancelled = false;
+    setResult({ id: track.id, peaks: null, status: "loading" });
+    void playerController.getWaveform(track, WAVEFORM_BUCKETS).then((peaks) => {
+      if (cancelled) return;
+      setResult({ id: track.id, peaks, status: peaks ? "ready" : "unavailable" });
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Keyed on the id: a new Track object for the same song must not trigger a second decode.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trackId, playerController]);
+
+  // A result for the previous track must never draw under the new one for even one frame.
+  return result.id === trackId ? result : { id: trackId, peaks: null, status: (trackId ? "loading" : "empty") as WaveformStatus };
+}
+
+/**
+ * The whole song at once, left to right, with the played part lit — the overview a DJ uses to
+ * see where the breaks and drops are, as in Mixxx's overview waveform (which likewise shows the
+ * full track and is clickable to jump). Peaks are mirrored around the centre line and each
+ * pixel column takes the loudest bucket under it, so a transient never disappears when the
+ * panel is narrower than the bucket count.
+ */
+function Waveform({
+  peaks,
+  status,
+  fraction,
+  disabled,
+  onSeekFraction,
+}: {
+  peaks: Uint8Array | null;
+  status: WaveformStatus;
+  fraction: number;
+  disabled: boolean;
+  onSeekFraction: (fraction: number) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const [width, setWidth] = useState(0);
+  const draggingRef = useRef(false);
+
+  useEffect(() => {
+    const node = wrapRef.current;
+    if (!node) return;
+    const observer = new ResizeObserver(() => setWidth(Math.floor(node.clientWidth)));
+    observer.observe(node);
+    setWidth(Math.floor(node.clientWidth));
+    return () => observer.disconnect();
+  }, []);
+
+  const clamped = Math.max(0, Math.min(1, fraction));
+  const playedPx = Math.round(clamped * width);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || width <= 0) return;
+    const ratio = window.devicePixelRatio || 1;
+    const pixelWidth = Math.max(1, Math.floor(width * ratio));
+    const pixelHeight = Math.floor(WAVEFORM_HEIGHT * ratio);
+    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, pixelWidth, pixelHeight);
+    if (!peaks || peaks.length === 0) return;
+
+    const styles = getComputedStyle(canvas);
+    const played = styles.getPropertyValue("--color-primary").trim() || "#00cccc";
+    const unplayed = styles.getPropertyValue("--color-muted-foreground").trim() || "#888";
+    const mid = pixelHeight / 2;
+    const barWidth = Math.max(1, Math.round(ratio));
+    const gap = ratio >= 2 ? 1 : 0;
+    const step = barWidth + gap;
+    const playedEdge = clamped * pixelWidth;
+
+    for (let x = 0; x < pixelWidth; x += step) {
+      const from = Math.floor((x / pixelWidth) * peaks.length);
+      const to = Math.max(from + 1, Math.ceil(((x + step) / pixelWidth) * peaks.length));
+      let peak = 0;
+      for (let i = from; i < to && i < peaks.length; i += 1) {
+        if (peaks[i] > peak) peak = peaks[i];
+      }
+      // A floor of one pixel each side keeps silence visible as a thin line, not a gap.
+      const half = Math.max(ratio, (peak / 255) * mid * 0.96);
+      const isPlayed = x + barWidth <= playedEdge;
+      ctx.globalAlpha = isPlayed ? 1 : 0.45;
+      ctx.fillStyle = isPlayed ? played : unplayed;
+      ctx.fillRect(x, mid - half, barWidth, half * 2);
+    }
+    ctx.globalAlpha = 1;
+    // playedPx (not the raw fraction) is the dependency: redrawing on every 50ms tick that
+    // doesn't move the lit edge by a whole pixel would be pure waste.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [peaks, width, playedPx]);
+
+  const seekFromEvent = (event: React.PointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    onSeekFraction(Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)));
+  };
+
+  return (
+    <div
+      ref={wrapRef}
+      role="slider"
+      aria-label="Track position"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(clamped * 100)}
+      aria-disabled={disabled}
+      className={cn(
+        "relative w-full select-none overflow-hidden rounded-lg bg-background/40",
+        disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer",
+      )}
+      style={{ height: WAVEFORM_HEIGHT, touchAction: "none" }}
+      onPointerDown={(event) => {
+        if (disabled) return;
+        draggingRef.current = true;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        seekFromEvent(event);
+      }}
+      onPointerMove={(event) => {
+        if (draggingRef.current && !disabled) seekFromEvent(event);
+      }}
+      onPointerUp={() => {
+        draggingRef.current = false;
+      }}
+      onPointerCancel={() => {
+        draggingRef.current = false;
+      }}
+    >
+      {status === "ready" ? (
+        <canvas ref={canvasRef} className="block size-full" style={{ width: "100%", height: WAVEFORM_HEIGHT }} />
+      ) : (
+        <>
+          {/* No peaks to draw: a plain progress bar, so the position still reads and seeking still works. */}
+          <div className="absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-muted-foreground/25" />
+          <div
+            className="absolute left-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-primary"
+            style={{ width: `${clamped * 100}%` }}
+          />
+          <div
+            className={cn(
+              "pointer-events-none absolute inset-0 grid place-items-center pb-9 text-[10px] font-semibold tracking-wide text-muted-foreground",
+              status === "loading" && "animate-pulse",
+            )}
+          >
+            {status === "loading" && "Analysing waveform…"}
+            {status === "unavailable" && "Waveform appears once this track is downloaded"}
+          </div>
+        </>
+      )}
+      {status === "ready" && (
+        <div className="pointer-events-none absolute inset-y-0 w-px bg-foreground" style={{ left: `${clamped * 100}%` }} />
+      )}
+    </div>
+  );
 }
 
 function Deck({
@@ -43,6 +252,9 @@ function Deck({
   duration,
   playing,
   trim,
+  peaks,
+  waveformStatus,
+  locked,
   onPlay,
   onCue,
   onSeek,
@@ -57,6 +269,10 @@ function Deck({
   duration: number;
   playing: boolean;
   trim: number;
+  peaks: Uint8Array | null;
+  waveformStatus: WaveformStatus;
+  /** True while a MIX A → B is running: transport is the native crossfade's, not the person's. */
+  locked: boolean;
   onPlay: () => void;
   onCue: () => void;
   onSeek: (value: number) => void;
@@ -65,11 +281,6 @@ function Deck({
   onTrim: (value: number) => void;
   hotCues: (number | null)[];
 }) {
-  const waveform = useMemo(
-    () => buildWave(`${track?.id ?? side}-${side}`, 180, playing ? position * 3.2 : 0),
-    [track?.id, side, playing, Math.floor(position * 10)],
-  );
-  const pct = duration ? Math.min(100, (position / duration) * 100) : 0;
 
   return (
     <section className="min-w-0 flex-1 rounded-2xl bg-card/80 p-4 shadow-2xl shadow-black/20">
@@ -109,16 +320,13 @@ function Deck({
       </div>
 
       <div className="mb-3 rounded-xl bg-background/70 p-2">
-        <div className="relative flex h-20 items-center gap-[2px] overflow-hidden">
-          {waveform.map((height, index) => (
-            <div
-              key={index}
-              className={cn("w-1 shrink-0 rounded-full transition-opacity", index / waveform.length < pct / 100 ? "bg-primary" : "bg-muted-foreground/40")}
-              style={{ height: `${Math.max(8, height * 100)}%` }}
-            />
-          ))}
-          <div className="pointer-events-none absolute inset-y-0 w-px bg-foreground" style={{ left: `${pct}%` }} />
-        </div>
+        <Waveform
+          peaks={peaks}
+          status={waveformStatus}
+          fraction={duration ? position / duration : 0}
+          disabled={locked || !duration}
+          onSeekFraction={(fraction) => onSeek(fraction * duration)}
+        />
         <input
           aria-label={`Deck ${side} position`}
           type="range"
@@ -126,8 +334,9 @@ function Deck({
           max={Math.max(0.01, duration)}
           step={0.01}
           value={Math.min(position, duration || 0)}
+          disabled={locked}
           onChange={(event) => onSeek(Number(event.target.value))}
-          className="mt-2 w-full accent-[var(--color-primary)]"
+          className="mt-2 w-full accent-[var(--color-primary)] disabled:opacity-50"
         />
         <div className="flex justify-between text-[10px] text-muted-foreground">
           <span>{formatTime(position)}</span><span>{formatTime(duration)}</span>
@@ -135,13 +344,13 @@ function Deck({
       </div>
 
       <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3">
-        <button type="button" onClick={onCue} className="h-10 rounded-xl bg-muted text-xs font-bold hover:bg-muted/80">CUE</button>
-        <button type="button" onClick={onPlay} className="grid size-12 place-items-center rounded-full bg-primary text-primary-foreground shadow-lg shadow-primary/20">
+        <button type="button" onClick={onCue} disabled={locked} className="h-10 rounded-xl bg-muted text-xs font-bold hover:bg-muted/80 disabled:opacity-50">CUE</button>
+        <button type="button" onClick={onPlay} disabled={locked} className="grid size-12 place-items-center rounded-full bg-primary text-primary-foreground shadow-lg shadow-primary/20 disabled:opacity-50">
           {playing ? <PauseIcon size={19} /> : <PlayIcon size={19} />}
         </button>
         <div className="grid grid-cols-4 gap-1">
           {hotCues.map((cue, index) => (
-            <button key={index} type="button" onClick={() => onHotCue(index)} className={cn("h-10 rounded-lg text-[10px] font-bold", cue == null ? "bg-muted text-muted-foreground" : "bg-primary/20 text-primary")}>
+            <button key={index} type="button" onClick={() => onHotCue(index)} disabled={locked} className={cn("h-10 rounded-lg text-[10px] font-bold disabled:opacity-50", cue == null ? "bg-muted text-muted-foreground" : "bg-primary/20 text-primary")}>
               {cue == null ? `C${index + 1}` : formatTime(cue)}
             </button>
           ))}
@@ -171,6 +380,18 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   const [transitionSec, setTransitionSec] = useState(DEFAULT_TRANSITION_SEC);
   const [isMixing, setIsMixing] = useState(false);
   const canMix = Boolean(deckB) && !isMixing;
+
+  // mixAtoB awaits the whole native fade (and then a short ease) before it touches the mixer
+  // again. If DJ Mode is closed in that window the unmount cleanup has already restored the
+  // engine to (1, 0); letting the rest of the mix run would then re-apply the DJ levels to a
+  // player that is no longer in DJ Mode.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   // Set synchronously so a fast slider drag cannot start Deck B several times before the first
   // playCuedTrack resolves and flips deckBPlaying.
   const deckBStartingRef = useRef(false);
@@ -204,8 +425,11 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   }, [playerController]);
 
   const deckA = session.currentTrack;
+  const waveformA = useWaveform(playerController, deckA);
+  const waveformB = useWaveform(playerController, deckB);
   const durationA = deckA?.durationSec ?? playerController.getDuration();
   const durationB = deckBDuration || deckB?.durationSec || 0;
+
 
   // The player store intentionally does not emit on every audio sample, so the DJ surface
   // keeps its own lightweight visual clock while the real audio engine remains the source of truth.
@@ -272,17 +496,18 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     });
   }, [deckB, playerController]);
 
-  // Equal-power crossfade curve, then each deck's own trim knob on top. Trim is a client-side
-  // gain multiplier — the native engine only exposes one volume per deck, so "TRIM" is exactly
-  // that volume scaled before it is sent down, the same way a real mixer channel gain sits
-  // upstream of the crossfader.
+  // Mixxx-derived crossfade curve (see xfadeGains above), then each deck's own trim knob on
+  // top. Trim is a client-side gain multiplier — the native engine only exposes one volume per
+  // deck, so "TRIM" is exactly that volume scaled before it is sent down, the same way a real
+  // mixer channel gain sits upstream of the crossfader.
   const deckVolumes = (normalized: number): [number, number] => {
-    const angle = Math.max(0, Math.min(1, normalized)) * Math.PI / 2;
+    const [gainA, gainB] = xfadeGains(normalized);
     return [
-      Math.max(0, Math.min(1, Math.cos(angle) * trimA)),
-      Math.max(0, Math.min(1, Math.sin(angle) * trimB)),
+      Math.max(0, Math.min(1, gainA * trimA)),
+      Math.max(0, Math.min(1, gainB * trimB)),
     ];
   };
+
 
   const applyCrossfader = (value: number) => {
     if (isMixing) return;
@@ -314,15 +539,16 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
       return;
     }
     if (side === "A") setTrimA(clamped); else setTrimB(clamped);
-    const normalized = crossfader / 100;
-    const angle = normalized * Math.PI / 2;
-    const volumeA = Math.max(0, Math.min(1, Math.cos(angle) * (side === "A" ? clamped : trimA)));
-    const volumeB = Math.max(0, Math.min(1, Math.sin(angle) * (side === "B" ? clamped : trimB)));
+    const [xfadeA, xfadeB] = xfadeGains(crossfader / 100);
+    const volumeA = Math.max(0, Math.min(1, xfadeA * (side === "A" ? clamped : trimA)));
+    const volumeB = Math.max(0, Math.min(1, xfadeB * (side === "B" ? clamped : trimB)));
     setDeckMixVolumes([volumeA, volumeB]);
     void playerController.setDjDeckVolumes(volumeA, volumeB);
   };
 
   const playA = async () => {
+    // Pausing the outgoing deck mid-fade would leave the native crossfade ramping into silence.
+    if (isMixing) return;
     if (session.status === "playing") {
       await playerController.pauseDjActive();
       return;
@@ -336,7 +562,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   };
 
   const playB = async () => {
-    if (!deckB) return;
+    if (!deckB || isMixing) return;
     if (deckBPlaying) {
       const paused = await playerController.pauseCuedTrack(deckB);
       if (paused) {
@@ -381,8 +607,28 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
         // mixToTrack resolves as soon as Rust starts the fade. Stay locked until it finishes,
         // or a crossfader/trim move mid-fade fights the native ramp.
         await new Promise((resolve) => window.setTimeout(resolve, transitionSec * 1000 + 150));
-        setDeckMixVolumes([1, 0]);
-        void playerController.setDjDeckVolumes(1, 0);
+        if (!mountedRef.current) return;
+        // The promoted track keeps the trim it had as Deck B, not whatever the previous Deck A
+        // happened to be set to — trim is a property of the track's own level, not of which
+        // visual slot it's drawn in, and the engine's "A"/"B" already followed the promotion on
+        // its own (setDjDeckVolumes always means "whichever slot is active right now"). Landing
+        // on hard (1, 0) here would silently drop trim entirely the moment a mix finishes.
+        const promotedVolumeA = Math.max(0, Math.min(1, trimB));
+        setTrimA(trimB);
+        setTrimB(1);
+        // The native fade always lands the incoming deck at full output level. Dropping straight
+        // to the trimmed level from there is an audible step, so ease down over ~240ms instead.
+        if (promotedVolumeA < 0.999) {
+          const steps = 8;
+          for (let step = 1; step <= steps; step += 1) {
+            const level = 1 + (promotedVolumeA - 1) * (step / steps);
+            void playerController.setDjDeckVolumes(level, 0);
+            await new Promise((resolve) => window.setTimeout(resolve, 30));
+            if (!mountedRef.current) return;
+          }
+        }
+        setDeckMixVolumes([promotedVolumeA, 0]);
+        void playerController.setDjDeckVolumes(promotedVolumeA, 0);
         setCrossfader(0);
         setDeckB(null);
         setDeckBPlaying(false);
@@ -433,6 +679,9 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             duration={durationA}
             playing={session.status === "playing"}
             trim={trimA}
+            peaks={waveformA.peaks}
+            waveformStatus={waveformA.status}
+            locked={isMixing}
             onPlay={() => void playA()}
             onCue={() => void playerController.seekTo(hotCuesA[0] ?? 0)}
             onSeek={(value) => void playerController.seekTo(value)}
@@ -448,6 +697,9 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             duration={durationB}
             playing={deckBPlaying}
             trim={trimB}
+            peaks={waveformB.peaks}
+            waveformStatus={waveformB.status}
+            locked={isMixing}
             onPlay={() => void playB()}
             onCue={() => {
               if (!deckB) return;

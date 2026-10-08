@@ -4316,6 +4316,143 @@ where
     (Box::new(shaped) as audio::BoxedSource, duration)
 }
 
+/**
+ * Full-track peaks for a waveform display, computed once by decoding the whole file and
+ * downmixing to mono. Deliberately narrower than `native_audio_load`: only for sources whose
+ * bytes are already entirely on disk (`Offline`, `File`), not `Stream`.
+ *
+ * A `Stream` source needs `native_audio_load`'s `MediaBuffer`/`fill_media_buffer` machinery to
+ * start playing before the whole file has arrived — real value for playback, no matching value
+ * for a one-shot analysis that has to read the entire track before it can return anything
+ * anyway. Reusing that machinery here would mean either duplicating its fill/health/generation
+ * bookkeeping or bolting an unrelated consumer onto it blind; both were the wrong trade for a
+ * feature with a legitimate, honest fallback on the frontend — "waveform available once this
+ * track is downloaded" — instead of a half-verified attempt at the streaming case.
+ *
+ * `buckets` is how many peaks to return; the frontend picks it to match how many bars it can
+ * usefully draw. No duration is taken from the caller or the container: Opus in WebM usually
+ * declares none and provider metadata can be off by seconds, so the bucket boundaries come from
+ * how many frames were actually decoded instead (see `accumulate_peaks`).
+ */
+#[tauri::command]
+async fn native_audio_waveform(
+    app: tauri::AppHandle,
+    source: NativeAudioSource,
+    buckets: usize,
+) -> Result<Vec<u8>, CommandError> {
+    let buckets = buckets.clamp(8, 4096);
+    let (path, mime_type) = match source {
+        NativeAudioSource::Offline { track_id, mime_type } => {
+            (offline_entry_path(&app, &track_id)?, mime_type)
+        }
+        NativeAudioSource::File { path } => {
+            let path = PathBuf::from(path);
+            // Re-validated rather than trusted from the frontend, same trust boundary as
+            // `open_native_audio_reader`'s own `File` branch.
+            if !path.is_file() || !is_local_audio_file(&path) {
+                return Err(cache_error("local audio file is unavailable."));
+            }
+            let declared = local_audio_mime_type(&path).to_string();
+            (path, declared)
+        }
+        NativeAudioSource::Stream { .. } => {
+            return Err(cache_error("waveform is only available for downloaded audio."));
+        }
+    };
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, CommandError> {
+        use rodio::Source as _;
+
+        let mut probe = File::open(&path)
+            .map_err(|error| cache_error(format!("waveform read failed: {error}")))?;
+        let label = path.file_name().and_then(|name| name.to_str()).unwrap_or("file");
+        let mime_type = sniffed_mime(&mut probe, mime_type, label);
+        let reader: Box<dyn symphonia::core::io::MediaSource> = Box::new(probe);
+
+        let (peaks, frames) = if opus_source::is_opus(&mime_type) {
+            let decoded = opus_source::OpusSource::new(reader, &mime_type)
+                .map_err(|error| cache_error(format!("waveform decode failed: {error}")))?;
+            accumulate_peaks(decoded, buckets)
+        } else {
+            let decoded = rodio::Decoder::new(reader)
+                .map_err(|error| cache_error(format!("waveform decode failed: {error}")))?;
+            accumulate_peaks(decoded, buckets)
+        };
+
+        if frames == 0 {
+            return Err(cache_error("waveform: no audio decoded."));
+        }
+
+        // Normalized against this track's own loudest peak rather than a fixed ceiling — a
+        // quiet, well-mastered track would otherwise draw as a flat, unreadable line next to a
+        // loud one, which tells a DJ nothing about the track's own internal dynamics.
+        let loudest = peaks.iter().cloned().fold(0f32, f32::max).max(f32::EPSILON);
+        Ok(peaks
+            .into_iter()
+            .map(|peak| ((peak / loudest).clamp(0.0, 1.0) * 255.0).round() as u8)
+            .collect())
+    })
+    .await
+    .map_err(|error| cache_error(format!("waveform task failed: {error}")))?
+}
+
+/// One pass over a decoded source, returning `buckets` peaks across its whole length and how
+/// many frames were decoded (so a decode that produced nothing can be told apart).
+///
+/// Two deliberate choices, both found by testing the first draft rather than guessing:
+///
+/// * Each frame's amplitude is the loudest *channel*, not the channels averaged. Averaging
+///   cancels anything out of phase between left and right, so a wide stereo mix could draw as
+///   a flat line while sounding loud. A waveform overview is about how loud a moment is, and
+///   the loudest channel answers that without that failure.
+/// * Peaks are first kept in fixed ~20ms chunks and only afterwards resampled to `buckets`
+///   using the number of frames actually decoded. The earlier version placed each frame in its
+///   bucket from an *estimated* length, which meant wrong metadata left the tail of the
+///   waveform empty or piled it all into the last bar. Chunks cost a few kB even for an hour
+///   of audio, and remove the estimate (and the duration argument) altogether.
+fn accumulate_peaks<S>(mut source: S, buckets: usize) -> (Vec<f32>, u64)
+where
+    S: rodio::Source,
+{
+    let channels = source.channels().get().max(1) as usize;
+    let frames_per_chunk = ((source.sample_rate().get() / 50).max(1)) as u64;
+    let mut chunks: Vec<f32> = Vec::new();
+    let mut chunk_peak = 0f32;
+    let mut frame_index: u64 = 0;
+
+    'frames: loop {
+        let mut frame_peak = 0f32;
+        for _ in 0..channels {
+            match source.next() {
+                Some(sample) => frame_peak = frame_peak.max(sample.abs()),
+                None => break 'frames,
+            }
+        }
+        chunk_peak = chunk_peak.max(frame_peak);
+        frame_index += 1;
+        if frame_index % frames_per_chunk == 0 {
+            chunks.push(chunk_peak);
+            chunk_peak = 0.0;
+        }
+    }
+    if frame_index % frames_per_chunk != 0 {
+        chunks.push(chunk_peak);
+    }
+    if chunks.is_empty() {
+        return (vec![0f32; buckets], 0);
+    }
+
+    let total = chunks.len();
+    let peaks = (0..buckets)
+        .map(|bucket| {
+            let from = bucket * total / buckets;
+            let to = ((bucket + 1) * total / buckets).max(from + 1).min(total);
+            chunks[from..to].iter().cloned().fold(0f32, f32::max)
+        })
+        .collect();
+    (peaks, frame_index)
+}
+
 /// The ten band gains and the preamp, in dB. Applies to whatever is playing, immediately.
 #[tauri::command]
 fn native_audio_set_equalizer(preamp_db: f32, bands_db: Vec<f32>) -> Result<(), CommandError> {
@@ -5444,9 +5581,11 @@ pub fn run() {
             offline_audio_prune,
             fetch_youtube_music_audio,
             native_audio_load,
+            native_audio_waveform,
             native_audio_play,
             native_audio_pause,
             native_audio_stop,
+
             native_audio_seek,
             native_audio_set_volume,
             native_audio_set_rate,

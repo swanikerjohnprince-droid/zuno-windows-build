@@ -439,22 +439,77 @@ export class AudioEngine {
     this.onEnded?.();
   }
 
-  /** Starts the active DJ deck without claiming global single-player ownership. */
+  /**
+   * Starts the active DJ deck without claiming global single-player ownership.
+   *
+   * Deliberately does not call `claimPlayback()` — DJ Mode's whole point is Deck A and Deck B
+   * coexisting, and `claimPlayback` pauses every other engine plus every `<audio>`/`<video>`
+   * element on the page, which is the opposite of that. For a while this method only handled
+   * the Rust branch and returned `false` — silently, no error — for anything else, which meant
+   * Deck A's play button simply stopped responding for any track playing through the native
+   * `<audio>` element or the YouTube iframe instead of Rust: common for anything streaming
+   * rather than downloaded. The three branches below are the same three `play()` already has,
+   * just without the ownership claim and its accompanying `claimId`/`playbackOwner` bookkeeping
+   * — DJ Mode doesn't need that bookkeeping since it's never racing another claim to begin with.
+   */
   async playDjActive(): Promise<boolean> {
-    if (!this.useRustAudio || !this.rustTrackId) return false;
-    await rustAudio.setVolume(this.volume, this.muted);
-    await rustAudio.play();
+    if (this.rustTrackId) {
+      await rustAudio.setVolume(this.volume, this.muted);
+      await rustAudio.play();
+      return true;
+    }
+    if (this.audio && this.currentVideoId) {
+      this.applyNativeAudioSettings();
+      await this.audio.play();
+      return true;
+    }
+    if (this.useNativeAudio && !this.iframeFallbackActive) return false;
+    if (!this.currentVideoId) return false;
+
+    const player = await this.ensurePlayer();
+    if (this.muted) {
+      player.mute();
+    } else {
+      player.unMute();
+    }
+    player.setVolume(this.getOutputVolumePercent());
+    const videoId = this.currentVideoId;
+    const state = player.getPlayerState();
+    if (state === window.YT!.PlayerState.PLAYING && player.getVideoData().video_id === videoId) {
+      return true;
+    }
+    if (state === window.YT!.PlayerState.CUED || state === window.YT!.PlayerState.UNSTARTED) {
+      player.loadVideoById(videoId);
+    } else {
+      player.playVideo();
+    }
+    try {
+      await this.waitForPlayerState([window.YT!.PlayerState.PLAYING], 15_000, true, videoId);
+    } catch (error) {
+      if (!isPlayerStateTimeout(error)) throw error;
+    }
     return true;
   }
 
   /** Pauses the active DJ deck without affecting the standby deck. */
   async pauseDjActive(): Promise<boolean> {
-    if (!this.useRustAudio || !this.rustTrackId) return false;
-    await rustAudio.pause();
-    return true;
+    if (this.rustTrackId) {
+      await rustAudio.pause();
+      return true;
+    }
+    if (this.audio) {
+      this.audio.pause();
+      return true;
+    }
+    if (this.player) {
+      this.player.pauseVideo();
+      return true;
+    }
+    return false;
   }
 
   async play(): Promise<boolean> {
+
     const claimId = this.claimPlayback();
     if (this.rustTrackId) {
       await rustAudio.setVolume(this.volume, this.muted);

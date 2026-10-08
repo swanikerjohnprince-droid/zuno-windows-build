@@ -107,9 +107,22 @@ export async function stop(): Promise<void> {
   await invoke("native_audio_stop");
 }
 
+/**
+ * Full-track peaks for a waveform display. Only resolves for a source whose bytes are already
+ * on disk (`kind: "offline"` or `kind: "file"`) — see the Rust command's own doc comment for
+ * why `kind: "stream"` is deliberately not supported here. Callers should treat a rejection as
+ * "not available for this track" rather than a real failure.
+ */
+export function waveform(source: RustAudioSource, buckets: number): Promise<Uint8Array> {
+  return invoke<number[]>("native_audio_waveform", { source, buckets }).then(
+    (peaks) => Uint8Array.from(peaks),
+  );
+}
+
 export async function seek(seconds: number): Promise<void> {
   // Written through immediately so the progress bar does not snap back to the old position for
   // the up-to-250 ms before Rust's next event confirms the move.
+
   positionSec = Math.max(0, seconds);
   await invoke("native_audio_seek", { positionSec: positionSec });
 }
