@@ -4,6 +4,7 @@ import type { PlayerControllerActions } from "../../player/playerStore";
 import type { PlayerSession } from "../../player/PlayerController";
 import { TrackArtwork } from "../components/TrackArtwork";
 import { cn } from "@/lib/utils";
+import { Marquee } from "@/components/motion/marquee";
 import { PlayIcon, PauseIcon, SkipNextIcon, MusicNoteIcon, ArrowRightIcon } from "@/ui/icons";
 
 /** Bounds for the operator-adjustable "MIX A → B" transition length, in seconds. */
@@ -53,6 +54,50 @@ interface DJModeProps {
   session: PlayerSession;
   playerController: PlayerControllerActions;
   onClose: () => void;
+}
+
+function ScrollingText({
+  children,
+  className,
+  speed = 22,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  speed?: number;
+}) {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const text = textRef.current;
+    if (!viewport || !text) return;
+
+    const update = () => setOverflowing(text.scrollWidth > viewport.clientWidth + 1);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(viewport);
+    observer.observe(text);
+    return () => observer.disconnect();
+  }, [children]);
+
+  return (
+    <div ref={viewportRef} className={cn("min-w-0 overflow-hidden whitespace-nowrap", className)}>
+      <span
+        ref={textRef}
+        aria-hidden={overflowing}
+        className={cn("inline-block whitespace-nowrap", overflowing && "invisible absolute")}
+      >
+        {children}
+      </span>
+      {overflowing && (
+        <Marquee speed={speed} gap="2.5rem" className={className}>
+          <span className="whitespace-nowrap">{children}</span>
+        </Marquee>
+      )}
+    </div>
+  );
 }
 
 function formatTime(seconds: number) {
@@ -287,8 +332,8 @@ function Deck({
       <div className="mb-4 flex items-center justify-between">
         <div>
           <div className="text-[10px] font-bold tracking-[0.22em] text-primary">DECK {side}</div>
-          <div className="mt-1 truncate text-lg font-semibold">{track?.title ?? "Load a track"}</div>
-          <div className="truncate text-xs text-muted-foreground">{track?.artist ?? "Choose a song from the library"}</div>
+          <ScrollingText className="mt-1 text-lg font-semibold">{track?.title ?? "Load a track"}</ScrollingText>
+          <ScrollingText className="text-xs text-muted-foreground">{track?.artist ?? "Choose a song from the library"}</ScrollingText>
         </div>
         <div className="flex items-center gap-3 text-[10px] font-semibold text-muted-foreground">
           <label className="flex items-center gap-1.5">
@@ -659,7 +704,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
         <div className="mb-4 flex items-center gap-3">
           <div className="flex-1 rounded-xl bg-white/5 px-4 py-3">
             <div className="text-[10px] font-bold tracking-widest text-muted-foreground">DECK A</div>
-            <div className="truncate text-sm font-bold">{deckA?.title ?? "No track playing"}</div>
+            <ScrollingText className="text-sm font-bold">{deckA?.title ?? "No track playing"}</ScrollingText>
           </div>
           <div className="rounded-xl bg-white/5 px-4 py-3 text-center">
             <div className="text-[10px] font-bold tracking-widest text-muted-foreground">CROSSFADER</div>
@@ -667,7 +712,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
           </div>
           <div className="flex-1 rounded-xl bg-white/5 px-4 py-3 text-right">
             <div className="text-[10px] font-bold tracking-widest text-muted-foreground">DECK B</div>
-            <div className="truncate text-sm font-bold">{deckB?.title ?? "Load a track"}</div>
+            <ScrollingText className="text-sm font-bold">{deckB?.title ?? "Load a track"}</ScrollingText>
           </div>
         </div>
 
