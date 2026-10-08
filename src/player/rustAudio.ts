@@ -108,13 +108,20 @@ export async function stop(): Promise<void> {
 }
 
 /**
- * Full-track peaks for a waveform display. Only resolves for a source whose bytes are already
- * on disk (`kind: "offline"` or `kind: "file"`) — see the Rust command's own doc comment for
- * why `kind: "stream"` is deliberately not supported here. Callers should treat a rejection as
- * "not available for this track" rather than a real failure.
+ * Full-track peaks for a waveform display, `buckets` of them, each 0-255.
+ *
+ * `source` is only for tracks whose bytes are on disk (`offline` / `file`). Pass `null` for a
+ * streaming track: the Rust side then reads the buffer that track's own playback is already
+ * filling, so nothing is downloaded a second time — and if the track has not been loaded onto
+ * a deck yet it waits a few seconds for that to happen before giving up. A rejection means
+ * "not available right now", not a fault; callers retry once the track is actually playing.
  */
-export function waveform(source: RustAudioSource, buckets: number): Promise<Uint8Array> {
-  return invoke<number[]>("native_audio_waveform", { source, buckets }).then(
+export function waveform(
+  trackId: string,
+  source: RustAudioSource | null,
+  buckets: number,
+): Promise<Uint8Array> {
+  return invoke<number[]>("native_audio_waveform", { trackId, source, buckets }).then(
     (peaks) => Uint8Array.from(peaks),
   );
 }
@@ -122,7 +129,6 @@ export function waveform(source: RustAudioSource, buckets: number): Promise<Uint
 export async function seek(seconds: number): Promise<void> {
   // Written through immediately so the progress bar does not snap back to the old position for
   // the up-to-250 ms before Rust's next event confirms the move.
-
   positionSec = Math.max(0, seconds);
   await invoke("native_audio_seek", { positionSec: positionSec });
 }
