@@ -5,7 +5,6 @@ import type { Album, Artist, Playlist, SearchResults, Track } from "../datasourc
 import { looksLikeYouTubeLink } from "../datasource/youtube/links";
 import { useDisableContextMenu } from "./hooks/useDisableContextMenu";
 import { HomePage } from "./pages/HomePage";
-import { DJMode } from "./pages/DJMode";
 
 /*
  * Every page used to be statically imported, so the whole app — settings, lyrics, all four
@@ -36,6 +35,8 @@ const HistoryPage = lazy(() =>
 const SettingsPage = lazy(() =>
   import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
 const LyricsView = lazy(() => import("./pages/LyricsView").then((m) => ({ default: m.LyricsView })));
+// Opened on demand, so it stays out of the startup bundle (waveform, mixer and deck code).
+const DJMode = lazy(() => import("./pages/DJMode").then((m) => ({ default: m.DJMode })));
 import { SearchOverlay } from "./components/SearchOverlay";
 import { TrackContextMenuProvider } from "./components/TrackContextMenu";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -139,6 +140,11 @@ const MINI_PLAYER_BOTTOM_MARGIN = 24;
 const MAIN_WINDOW_DRAG_BACKGROUND_SUPPRESS_MS = 1500;
 /** How often the session is written purely to keep the restored playback position fresh. */
 const SESSION_HEARTBEAT_MS = 5000;
+/**
+ * Trailing delay before a player change is written to the saved session. A volume drag emits on
+ * every pointer move; only the settled value is worth a stringify of every tab's queue.
+ */
+const SESSION_PERSIST_DEBOUNCE_MS = 400;
 const SLEEP_RECOVERY_TIMER_INTERVAL_MS = 15000;
 const SLEEP_RECOVERY_TIMER_DRIFT_MS = 60000;
 const TAB_SHORTCUT_ACTIONS: KeyboardShortcutAction[] = [
@@ -283,6 +289,22 @@ async function hasStoredYoutubeSession(): Promise<boolean> {
   return cookie[0].status === "fulfilled" && cookie[0].value !== null;
 }
 
+/**
+ * DJ Mode's own subscription to the full player session.
+ *
+ * App used to call `usePlayerSession()` itself just to hand the result down, which made the
+ * whole application re-render on every player emit — including each pointer move of the volume
+ * slider, undoing the narrow `usePlayerSelector` it already uses for its own state. Living here,
+ * the subscription costs anything only while DJ or Split Mode is actually open.
+ */
+function DJModeHost({ onClose }: { onClose: () => void }) {
+  const session = usePlayerSession();
+  if (!session) {
+    return <div className="grid h-full place-items-center text-sm text-muted-foreground">Loading DJ…</div>;
+  }
+  return <DJMode session={session} playerController={playerController} onClose={onClose} />;
+}
+
 export default function App() {
   useDisableContextMenu();
   const libraryState = useLibraryState();
@@ -300,7 +322,6 @@ export default function App() {
     }),
     shallowEqual,
   );
-  const playerSession = usePlayerSession();
   /* Resolved once at startup. Null in every case except the first launch after an update —
      see resolveReleaseNoteVersion, which records silently for all the others. */
   const [releaseNoteVersion, setReleaseNoteVersion] = useState<string | null>(null);
@@ -808,7 +829,34 @@ export default function App() {
 
   useEffect(() => {
     persistAppSession();
-  }, [activeTabId, nextTabId, persistAppSession, playerSession, tabs]);
+  }, [activeTabId, nextTabId, persistAppSession, tabs]);
+
+  /*
+   * Player changes (queue, track, status, volume...) used to reach the line above through a
+   * `playerSession` render dependency, so every emit — a volume drag fires one per pointer move —
+   * rebuilt and stringified every tab's queue and history. Subscribe to the store directly
+   * instead and write once the burst settles. The teardown writes anything still pending, and
+   * the `beforeunload` / heartbeat writers above are unchanged, so nothing is left unsaved.
+   */
+  useEffect(() => {
+    let timer = 0;
+    let pending = false;
+    const flush = () => {
+      window.clearTimeout(timer);
+      if (!pending) return;
+      pending = false;
+      persistAppSession();
+    };
+    const unsubscribe = tabManager.subscribe(() => {
+      pending = true;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(flush, SESSION_PERSIST_DEBOUNCE_MS);
+    });
+    return () => {
+      unsubscribe();
+      flush();
+    };
+  }, [persistAppSession]);
 
   useEffect(() => {
     const unlistenPromise = listen("main-window-recovery-reload", persistAppSession);
@@ -2067,14 +2115,10 @@ useEffect(() => {
           hideSidebar={playerUIState.isLyricsFullscreen || isDJMode}
           splitMode={isSplitMode}
           splitOrientation={splitOrientation}
-          splitPanel={playerSession ? (
-            <DJMode
-              session={playerSession}
-              playerController={playerController}
-              onClose={() => setIsSplitMode(false)}
-            />
-          ) : (
-            <div className="grid h-full place-items-center text-sm text-muted-foreground">Loading DJ…</div>
+          splitPanel={(
+            <Suspense fallback={<div className="grid h-full place-items-center text-sm text-muted-foreground">Loading DJ…</div>}>
+              <DJModeHost onClose={() => setIsSplitMode(false)} />
+            </Suspense>
           )}
           showTransientScrollbar={
             !playerUIState.isLyricsOpen
@@ -2113,12 +2157,8 @@ useEffect(() => {
             onDismiss={canNavigateBack ? handleNavigateBack : undefined}
           >
           <Suspense fallback={<div className="min-h-0 flex-1" />}>
-          {isDJMode && playerSession ? (
-            <DJMode
-              session={playerSession}
-              playerController={playerController}
-              onClose={() => setIsDJMode(false)}
-            />
+          {isDJMode ? (
+            <DJModeHost onClose={() => setIsDJMode(false)} />
           ) : playerUIState.isLyricsOpen && activeTab?.view !== "settings" ? (
             <LyricsView onClose={() => playerUIStore.setLyricsOpen(false)} />
           ) : (
