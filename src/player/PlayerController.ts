@@ -390,6 +390,16 @@ export class PlayerController {
   }
 
   /** Keep ordinary browse loads from tearing down DJ Mode's standby deck. */
+  /**
+   * The output stream was reopened — a different device was chosen, or the OS default moved —
+   * and Rust dropped both decks. Clears what this controller believes is loaded so the reload
+   * that follows starts from the truth.
+   */
+  resetAfterOutputChange(): void {
+    this.audioEngine.forgetRustDecks();
+    this.loadedTrackId = null;
+  }
+
   setDjDeckActive(active: boolean): void {
     this.djDeckActive = active;
     // The engine keeps its own copy: it is what stops loadRustAudio from dropping Deck B.
