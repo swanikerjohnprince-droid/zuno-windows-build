@@ -1151,6 +1151,22 @@ export class AudioEngine {
     });
   }
 
+  /**
+   * Forgets what is loaded on the Rust decks without telling Rust, for when Rust has already
+   * lost them — it reopened the output stream, which drops both decks along with it.
+   *
+   * Without this the bookkeeping keeps describing decks that no longer exist: `cueTrack` sees
+   * the standby id already matches and skips reloading Deck B, so it stays silent forever, and
+   * `play()` finds a "loaded" track on an empty deck and starts nothing. Deliberately not
+   * `releaseRustAudio`, which would send a stop to a stream that has just been replaced.
+   */
+  forgetRustDecks(): void {
+    this.rustTrackId = null;
+    this.rustStandbyTrackId = null;
+    this.rustDurationSec = 0;
+    this.rustStandbyDurationSec = 0;
+  }
+
   private releaseRustAudio(): void {
     if (!this.rustTrackId && !this.rustStandbyTrackId) return;
     /*
