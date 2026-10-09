@@ -4,6 +4,7 @@ import type { PlayerControllerActions } from "../../player/playerStore";
 import type { PlayerSession } from "../../player/PlayerController";
 import { TrackArtwork } from "../components/TrackArtwork";
 import { cn } from "@/lib/utils";
+import { OUTPUT_RESET_EVENT } from "../settings/audioOutputDevice";
 import { Marquee } from "@/components/motion/marquee";
 import { PlayIcon, PauseIcon, SkipNextIcon, MusicNoteIcon, ArrowRightIcon } from "@/ui/icons";
 
@@ -437,6 +438,30 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   const [transitionSec, setTransitionSec] = useState(DEFAULT_TRANSITION_SEC);
   const [isMixing, setIsMixing] = useState(false);
   const canMix = Boolean(deckB) && !isMixing;
+
+  // The output stream gets reopened when a different device is chosen or the OS default moves, and
+  // that empties both decks. Deck A is reloaded by whoever reopened it; Deck B is only ever
+  // loaded by this component, so it has to put itself back: re-cue it, show it as stopped (it
+  // is — nothing is playing on a deck that was just created), and re-send the mixer levels,
+  // which a fresh deck starts without. A ref, not state: this subscription must not be torn
+  // down and re-added on every render just to see the latest Deck B.
+  const outputResetRef = useRef({ deckB, deckMixVolumes, playerController });
+  outputResetRef.current = { deckB, deckMixVolumes, playerController };
+  useEffect(() => {
+    const onReset = () => {
+      const { deckB: current, deckMixVolumes: volumes, playerController: controller } = outputResetRef.current;
+      setDeckBPlaying(false);
+      setDeckBStartedAt(null);
+      if (!current) return;
+      void controller.cueTrack(current).then((ready) => {
+        if (!ready) return;
+        setDeckBDuration(controller.getCuedDuration(current));
+        void controller.setDjDeckVolumes(volumes[0], volumes[1]);
+      });
+    };
+    window.addEventListener(OUTPUT_RESET_EVENT, onReset);
+    return () => window.removeEventListener(OUTPUT_RESET_EVENT, onReset);
+  }, []);
 
   // mixAtoB awaits the whole native fade (and then a short ease) before it touches the mixer
   // again. If DJ Mode is closed in that window the unmount cleanup has already restored the
