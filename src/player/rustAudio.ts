@@ -30,6 +30,7 @@ let positionSec = 0;
 let durationSec = 0;
 let positionTrackId: string | null = null;
 let endedListener: (() => void) | null = null;
+let outputChangedListener: (() => void) | null = null;
 let unlisten: Promise<UnlistenFn[]> | null = null;
 
 /*
@@ -49,6 +50,12 @@ function ensureListening(): Promise<UnlistenFn[]> {
         positionSec = event.payload.positionSec;
         durationSec = event.payload.durationSec;
       }),
+      // The OS default output moved and Rust reopened the stream on it, which empties both decks.
+      // Subscribed here with the others (once per process) for the same reason: one engine, one
+      // event, and a listener per tab would each try to recover the same lost track.
+      listen("native-audio-output-changed", () => {
+        outputChangedListener?.();
+      }),
       listen<EndedEvent>("native-audio-ended", () => {
         // Zeroed after, not before: the listener needs the final position to tell a track that
         // finished from a stream that died.
@@ -63,6 +70,12 @@ function ensureListening(): Promise<UnlistenFn[]> {
 
 export function setEndedListener(listener: (() => void) | null): void {
   endedListener = listener;
+  if (listener) void ensureListening();
+}
+
+/** Called when Rust moved the stream to a new OS default output and both decks were emptied. */
+export function setOutputChangedListener(listener: (() => void) | null): void {
+  outputChangedListener = listener;
   if (listener) void ensureListening();
 }
 
