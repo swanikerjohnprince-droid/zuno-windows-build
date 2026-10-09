@@ -233,6 +233,24 @@ export function Layout({
 
   useEffect(() => () => clearScrollHideTimer(), [clearScrollHideTimer]);
 
+  /*
+   * Built once so it can live in either of two places. Normally it sits across the top of the
+   * page column. In Split Mode it moves into the browse half instead: the search is how you
+   * navigate *that* half, and stretched over both it ran right across the DJ panel, which has
+   * nothing to search.
+   */
+  const searchBar = showSearchBar ? (
+    <div className="relative shrink-0">
+      <SearchBar
+        onOpen={onOpenSearch}
+        canGoBack={canGoBack}
+        canGoForward={canGoForward}
+        onBack={onNavigateBack}
+        onForward={onNavigateForward}
+      />
+    </div>
+  ) : null;
+
   return (
     <div className="relative flex min-h-0 flex-1 overflow-hidden bg-background ">
      
@@ -289,17 +307,7 @@ export function Layout({
             </span>
           ) : null}
 
-          {showSearchBar && (
-            <div className="relative">
-              <SearchBar
-                onOpen={onOpenSearch}
-                canGoBack={canGoBack}
-                canGoForward={canGoForward}
-                onBack={onNavigateBack}
-                onForward={onNavigateForward}
-              />
-            </div>
-          )}
+          {!splitMode && searchBar}
 
           <div className="relative flex min-h-0 min-w-0 flex-1 gap-3 pb-3 ">
             <div className="relative min-h-0 min-w-0 flex-1">
@@ -316,8 +324,15 @@ export function Layout({
                     "flex h-full min-h-0 min-w-0 gap-2 overflow-hidden p-2",
                     splitOrientation === "vertical" ? "flex-row" : "flex-col",
                   )}>
-                    <section className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain rounded-xl">
-                      {children}
+                    {/*
+                      The scroller moves down a level so the search bar above it stays put while
+                      the page scrolls, the way it does in the unsplit layout.
+                    */}
+                    <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-hidden rounded-xl">
+                      {searchBar}
+                      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain rounded-xl">
+                        {children}
+                      </div>
                     </section>
                     <div
                       aria-hidden="true"
