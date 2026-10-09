@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Track } from "../../datasource/types";
-import type { PlayerControllerActions } from "../../player/playerStore";
+import { usePlayerSessionSelector, type PlayerControllerActions } from "../../player/playerStore";
 import type { PlayerSession } from "../../player/PlayerController";
 import { TrackArtwork } from "../components/TrackArtwork";
 import { cn } from "@/lib/utils";
@@ -12,6 +12,9 @@ import { PlayIcon, PauseIcon, SkipNextIcon, MusicNoteIcon, ArrowRightIcon } from
 const MIN_TRANSITION_SEC = 1;
 const MAX_TRANSITION_SEC = 12;
 const DEFAULT_TRANSITION_SEC = 4;
+
+/** How often the on-screen deck positions refresh. Audio timing never depends on this. */
+const DECK_CLOCK_MS = 100;
 
 /** Per-deck trim range. 1 is unity gain; this only ever attenuates or boosts around that. */
 const MIN_TRIM = 0.5;
@@ -190,30 +193,26 @@ function Waveform({
 
   const clamped = Math.max(0, Math.min(1, fraction));
   const playedPx = Math.round(clamped * width);
+  const ratio = window.devicePixelRatio || 1;
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || width <= 0) return;
-    const ratio = window.devicePixelRatio || 1;
+  /*
+   * The bar heights depend only on the peaks and the width, never on the playhead, so they are
+   * worked out once here instead of on every redraw. The old draw loop re-scanned the peaks for
+   * every pixel column each time the lit edge moved by a pixel; this leaves the draw effect
+   * with nothing to do but fill rectangles.
+   */
+  const columns = useMemo(() => {
+    if (!peaks || peaks.length === 0 || width <= 0) return null;
     const pixelWidth = Math.max(1, Math.floor(width * ratio));
     const pixelHeight = Math.floor(WAVEFORM_HEIGHT * ratio);
-    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
-    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.clearRect(0, 0, pixelWidth, pixelHeight);
-    if (!peaks || peaks.length === 0) return;
-
-    const styles = getComputedStyle(canvas);
-    const played = styles.getPropertyValue("--color-primary").trim() || "#00cccc";
-    const unplayed = styles.getPropertyValue("--color-muted-foreground").trim() || "#888";
     const mid = pixelHeight / 2;
     const barWidth = Math.max(1, Math.round(ratio));
-    const gap = ratio >= 2 ? 1 : 0;
-    const step = barWidth + gap;
-    const playedEdge = clamped * pixelWidth;
-
-    for (let x = 0; x < pixelWidth; x += step) {
+    const step = barWidth + (ratio >= 2 ? 1 : 0);
+    const count = Math.ceil(pixelWidth / step);
+    const tops = new Float32Array(count);
+    const heights = new Float32Array(count);
+    for (let column = 0; column < count; column += 1) {
+      const x = column * step;
       const from = Math.floor((x / pixelWidth) * peaks.length);
       const to = Math.max(from + 1, Math.ceil(((x + step) / pixelWidth) * peaks.length));
       let peak = 0;
@@ -222,16 +221,63 @@ function Waveform({
       }
       // A floor of one pixel each side keeps silence visible as a thin line, not a gap.
       const half = Math.max(ratio, (peak / 255) * mid * 0.96);
-      const isPlayed = x + barWidth <= playedEdge;
-      ctx.globalAlpha = isPlayed ? 1 : 0.45;
-      ctx.fillStyle = isPlayed ? played : unplayed;
-      ctx.fillRect(x, mid - half, barWidth, half * 2);
+      tops[column] = mid - half;
+      heights[column] = half * 2;
     }
+    return { pixelWidth, pixelHeight, barWidth, step, count, tops, heights };
+  }, [peaks, width, ratio]);
+
+  // `getComputedStyle` can force a synchronous style recalculation, and it used to run on every
+  // redraw. The colours only change with the theme, which is one attribute on <html>.
+  const colorsRef = useRef<{ key: string; played: string; unplayed: string } | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !columns) return;
+    const { pixelWidth, pixelHeight, barWidth, step, count, tops, heights } = columns;
+    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, pixelWidth, pixelHeight);
+
+    const root = document.documentElement;
+    const themeKey = `${root.getAttribute("data-theme") ?? ""}|${root.getAttribute("style") ?? ""}`;
+    if (!colorsRef.current || colorsRef.current.key !== themeKey) {
+      const styles = getComputedStyle(canvas);
+      colorsRef.current = {
+        key: themeKey,
+        played: styles.getPropertyValue("--color-primary").trim() || "#00cccc",
+        unplayed: styles.getPropertyValue("--color-muted-foreground").trim() || "#888",
+      };
+    }
+    const { played, unplayed } = colorsRef.current;
+
+    // Columns are laid out left to right, so "played" is simply the first `split` of them.
+    const playedEdge = clamped * pixelWidth;
+    const split = Math.max(0, Math.min(count, Math.floor((playedEdge - barWidth) / step) + 1));
+
+    // Two paths and two fills rather than one fillRect (and one style change) per column.
     ctx.globalAlpha = 1;
-    // playedPx (not the raw fraction) is the dependency: redrawing on every 50ms tick that
+    ctx.fillStyle = played;
+    ctx.beginPath();
+    for (let column = 0; column < split; column += 1) {
+      ctx.rect(column * step, tops[column], barWidth, heights[column]);
+    }
+    ctx.fill();
+
+    ctx.globalAlpha = 0.45;
+    ctx.fillStyle = unplayed;
+    ctx.beginPath();
+    for (let column = split; column < count; column += 1) {
+      ctx.rect(column * step, tops[column], barWidth, heights[column]);
+    }
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    // playedPx (not the raw fraction) is the dependency: redrawing on every tick that
     // doesn't move the lit edge by a whole pixel would be pure waste.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [peaks, width, playedPx]);
+  }, [columns, playedPx]);
 
   const seekFromEvent = (event: React.PointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -418,6 +464,204 @@ function Deck({
   );
 }
 
+const EMPTY_QUEUE: Track[] = [];
+const selectQueue = (session: PlayerSession | null) => session?.queue ?? EMPTY_QUEUE;
+const sameTracks = (a: Track[], b: Track[]) =>
+  a.length === b.length && a.every((track, index) => track === b[index]);
+
+/**
+ * The queue, with a stable identity.
+ *
+ * `exportSession()` builds a fresh `queue` array on every player emit, so reading
+ * `session.queue` hands back a "new" queue far more often than the queue changes. Comparing by
+ * track identity keeps the previous array while the tracks are the same, which is what lets the
+ * lists below sit out the DJ surface's frequent position re-renders.
+ */
+function useStableQueue(): Track[] {
+  return usePlayerSessionSelector(selectQueue, sameTracks);
+}
+
+type TrackRowVariant = "queue" | "picker" | "quick";
+
+const TrackListRow = memo(function TrackListRow({
+  track,
+  variant,
+  index = 0,
+  active,
+  label,
+  onPick,
+}: {
+  track: Track;
+  variant: TrackRowVariant;
+  index?: number;
+  active: boolean;
+  label?: string;
+  onPick: (track: Track) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onPick(track)}
+      className={cn(
+        "flex items-center gap-3 rounded-xl px-3 py-2 text-left hover:bg-white/5",
+        variant === "queue" && "w-full",
+        active && (variant === "queue" ? "bg-primary/10 ring-1 ring-primary/20" : "bg-primary/10"),
+      )}
+    >
+      {variant === "queue" && (
+        <span className="w-5 text-center text-[10px] font-bold text-muted-foreground">{index + 1}</span>
+      )}
+      <TrackArtwork artworkUrl={track.artworkUrl} className="size-9 rounded-lg" size={48} iconSize={15} />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-xs font-medium">{track.title}</span>
+        <span className="block truncate text-[10px] text-muted-foreground">{track.artist}</span>
+      </span>
+      {variant === "quick" ? (
+        <SkipNextIcon size={14} className="text-muted-foreground" />
+      ) : (
+        <span className="text-[9px] font-bold text-muted-foreground">{label}</span>
+      )}
+    </button>
+  );
+});
+
+/*
+ * The three track lists below used to be inline in DJMode, so the deck clocks (a state update
+ * every 50-80ms) re-rendered every row of every list — each with its own artwork component —
+ * up to ~25 times a second. They are separate memoised components now: they read the queue
+ * themselves and take only primitives and stable callbacks, so a clock tick never reaches them.
+ */
+const DeckAQueueList = memo(function DeckAQueueList({
+  deckAId,
+  playing,
+  onLoad,
+}: {
+  deckAId: string | null;
+  playing: boolean;
+  onLoad: (track: Track) => void;
+}) {
+  const queue = useStableQueue();
+  return (
+    <div className="mt-4 rounded-2xl bg-card/60 p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <div className="text-xs font-bold tracking-widest">DECK A QUEUE</div>
+          <div className="text-[10px] text-muted-foreground">Your main Zuno queue stays here while DJ Mode is open.</div>
+        </div>
+        <span className="rounded-full bg-muted px-2 py-1 text-[9px] font-bold text-muted-foreground">{queue.length} TRACKS</span>
+      </div>
+      <div className="max-h-56 overflow-auto pr-1">
+        {queue.map((track, index) => {
+          const active = deckAId === track.id;
+          return (
+            <TrackListRow
+              key={track.id}
+              track={track}
+              variant="queue"
+              index={index}
+              active={active}
+              label={active ? (playing ? "PLAYING" : "LOADED") : "LOAD"}
+              onPick={onLoad}
+            />
+          );
+        })}
+        {!queue.length && <div className="py-6 text-center text-xs text-muted-foreground">Add tracks to the main Zuno queue.</div>}
+      </div>
+    </div>
+  );
+});
+
+const DeckPicker = memo(function DeckPicker({
+  side,
+  deckAId,
+  deckBId,
+  onPick,
+  onClose,
+}: {
+  side: "A" | "B";
+  deckAId: string | null;
+  deckBId: string | null;
+  onPick: (track: Track) => void;
+  onClose: () => void;
+}) {
+  const queue = useStableQueue();
+  const selectedId = side === "A" ? deckAId : deckBId;
+  return (
+    <div className="mt-4 rounded-2xl bg-card/60 p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <div className="text-xs font-bold tracking-widest">LOAD ON DECK {side}</div>
+          <div className="text-[10px] text-muted-foreground">
+            {side === "A" ? "Load a track as the active deck" : "Choose a track to prepare"}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-lg bg-white/5 px-3 py-1 text-[10px] hover:bg-white/10"
+        >
+          CLOSE
+        </button>
+      </div>
+      <div className="grid gap-1">
+        {queue.map((track) => {
+          const active = selectedId === track.id;
+          return (
+            <TrackListRow
+              key={track.id}
+              track={track}
+              variant="picker"
+              active={active}
+              label={active ? (side === "A" ? "ACTIVE" : "CUED") : "LOAD"}
+              onPick={onPick}
+            />
+          );
+        })}
+        {!queue.length && (
+          <div className="py-6 text-center text-xs text-muted-foreground">
+            Add tracks to the main Zuno queue first.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
+
+const DeckBQuickLoad = memo(function DeckBQuickLoad({
+  deckAId,
+  deckBId,
+  onPick,
+}: {
+  deckAId: string | null;
+  deckBId: string | null;
+  onPick: (track: Track) => void;
+}) {
+  const queue = useStableQueue();
+  const nextTracks = useMemo(() => queue.filter((track) => track.id !== deckAId), [queue, deckAId]);
+  return (
+    <div className="mt-4 rounded-2xl bg-card/60 p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <div className="text-xs font-bold tracking-widest">DECK B QUICK LOAD</div>
+        <div className="text-[10px] text-muted-foreground">Choose a track to prepare</div>
+      </div>
+      <div className="grid gap-1">
+        {nextTracks.map((track) => (
+          <TrackListRow
+            key={track.id}
+            track={track}
+            variant="quick"
+            active={deckBId === track.id}
+            onPick={onPick}
+          />
+        ))}
+        {!nextTracks.length && (
+          <div className="py-6 text-center text-xs text-muted-foreground">Add more tracks to the queue to populate Deck B.</div>
+        )}
+      </div>
+    </div>
+  );
+});
+
 export function DJMode({ session, playerController, onClose }: DJModeProps) {
   const [deckB, setDeckB] = useState<Track | null>(
     session.queue[session.queueIndex + 1] ?? session.queue.find((track) => track.id !== session.currentTrack?.id) ?? null,
@@ -437,6 +681,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   const [trimB, setTrimB] = useState(1);
   const [transitionSec, setTransitionSec] = useState(DEFAULT_TRANSITION_SEC);
   const [isMixing, setIsMixing] = useState(false);
+  const queue = useStableQueue();
   const canMix = Boolean(deckB) && !isMixing;
 
   // The output stream gets reopened when a different device is chosen or the OS default moves, and
@@ -521,7 +766,9 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     }
     const tick = () => setDeckAPosition(Math.max(0, playerController.getCurrentTime()));
     tick();
-    const timer = window.setInterval(tick, 50);
+    // 100ms: one waveform pixel is roughly a third of a second of a normal-length track, so a
+    // faster clock only re-rendered the deck without moving anything a person could see.
+    const timer = window.setInterval(tick, DECK_CLOCK_MS);
     return () => window.clearInterval(timer);
   }, [session.status, session.positionSec, playerController, deckA?.id]);
 
@@ -530,14 +777,14 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   // the DJ deck.
   useEffect(() => {
     if (!deckB || deckB.id === deckA?.id) {
-      const replacement = session.queue.find((track) => track.id !== deckA?.id) ?? null;
+      const replacement = queue.find((track) => track.id !== deckA?.id) ?? null;
       setDeckB(replacement);
       setDeckBPlaying(false);
       setDeckBDuration(0);
       setDeckBPosition(0);
       setDeckBStartedAt(null);
     }
-  }, [deckA?.id, session.queue, deckB]);
+  }, [deckA?.id, queue, deckB]);
 
   // Deck B has its own visual clock. Rust owns the actual audio clock; this clock is only for
   // showing the prepared standby deck while it plays simultaneously.
@@ -550,7 +797,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
         setDeckBPlaying(false);
         setDeckBStartedAt(null);
       }
-    }, 80);
+    }, DECK_CLOCK_MS);
     return () => window.clearInterval(timer);
   }, [deckBPlaying, deckBStartedAt, durationB]);
 
@@ -661,16 +908,30 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   };
 
   const setCue = (side: "A" | "B", index: number) => {
-    const time = side === "A" ? session.positionSec : deckBPosition;
+    // `session.positionSec` is a snapshot taken when the session was last exported, which is
+    // not on every audio sample, so a cue set mid-song landed wherever playback last emitted.
+    const time = side === "A" ? Math.max(0, playerController.getCurrentTime()) : deckBPosition;
     const setter = side === "A" ? setHotCuesA : setHotCuesB;
     setter((current) => current.map((value, i) => i === index ? (value == null ? time : null) : value));
   };
 
-  const selectDeckB = (track: Track) => {
+  // Stable identities: these are handed to memoised lists, and a new function every render
+  // would make every row re-render along with the deck clock.
+  const selectDeckB = useCallback((track: Track) => {
     // Loading a track onto Deck B must never move the crossfader or change Deck A's level.
     // The two decks are independent: the crossfader is the only control that changes their mix.
     setDeckB(track);
-  };
+  }, []);
+  const loadOnDeckA = useCallback((track: Track) => {
+    void playerController.loadTrack(track, true);
+    setDeckAPosition(0);
+  }, [playerController]);
+  const closeDeckPicker = useCallback(() => setShowDeckPicker(null), []);
+  const pickFromDeckPicker = useCallback((track: Track) => {
+    if (showDeckPicker === "A") loadOnDeckA(track);
+    else selectDeckB(track);
+    setShowDeckPicker(null);
+  }, [showDeckPicker, loadOnDeckA, selectDeckB]);
 
   /**
    * The headline DJ move: hand playback from the active deck straight to the cued Deck B over
@@ -722,8 +983,6 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
       setIsMixing(false);
     }
   };
-
-  const nextTracks = session.queue.filter((track) => track.id !== deckA?.id);
 
   return (
     <div className="@container/djmode flex h-full min-h-0 flex-col overflow-hidden rounded-2xl bg-background text-foreground">
@@ -865,118 +1124,25 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
           )}
         </div>
 
-        <div className="mt-4 rounded-2xl bg-card/60 p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <div>
-              <div className="text-xs font-bold tracking-widest">DECK A QUEUE</div>
-              <div className="text-[10px] text-muted-foreground">Your main Zuno queue stays here while DJ Mode is open.</div>
-            </div>
-            <span className="rounded-full bg-muted px-2 py-1 text-[9px] font-bold text-muted-foreground">{session.queue.length} TRACKS</span>
-          </div>
-          <div className="max-h-56 overflow-auto pr-1">
-            {session.queue.map((track, index) => (
-              <button key={track.id} type="button"
-                onClick={() => { void playerController.loadTrack(track, true); setDeckAPosition(0); }}
-                className={cn("flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left hover:bg-white/5", deckA?.id === track.id && "bg-primary/10 ring-1 ring-primary/20")}
-              >
-                <span className="w-5 text-center text-[10px] font-bold text-muted-foreground">{index + 1}</span>
-                <TrackArtwork artworkUrl={track.artworkUrl} className="size-9 rounded-lg" size={48} iconSize={15} />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs font-medium">{track.title}</span>
-                  <span className="block truncate text-[10px] text-muted-foreground">{track.artist}</span>
-                </span>
-                <span className="text-[9px] font-bold text-muted-foreground">
-                  {deckA?.id === track.id ? (session.status === "playing" ? "PLAYING" : "LOADED") : "LOAD"}
-                </span>
-              </button>
-            ))}
-            {!session.queue.length && <div className="py-6 text-center text-xs text-muted-foreground">Add tracks to the main Zuno queue.</div>}
-          </div>
-        </div>
+        <DeckAQueueList
+          deckAId={deckA?.id ?? null}
+          playing={session.status === "playing"}
+          onLoad={loadOnDeckA}
+        />
         {showDeckPicker && (
-          <div className="mt-4 rounded-2xl bg-card/60 p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <div>
-                <div className="text-xs font-bold tracking-widest">LOAD ON DECK {showDeckPicker}</div>
-                <div className="text-[10px] text-muted-foreground">
-                  {showDeckPicker === "A" ? "Load a track as the active deck" : "Choose a track to prepare"}
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowDeckPicker(null)}
-                className="rounded-lg bg-white/5 px-3 py-1 text-[10px] hover:bg-white/10"
-              >
-                CLOSE
-              </button>
-            </div>
-            <div className="grid gap-1">
-              {session.queue.map((track) => (
-                <button
-                  key={track.id}
-                  type="button"
-                  onClick={() => {
-                    if (showDeckPicker === "A") {
-                      void playerController.loadTrack(track, true);
-                      setDeckAPosition(0);
-                    } else {
-                      selectDeckB(track);
-                    }
-                    setShowDeckPicker(null);
-                  }}
-                  className={cn(
-                    "flex items-center gap-3 rounded-xl px-3 py-2 text-left hover:bg-white/5",
-                    ((showDeckPicker === "A" ? deckA?.id : deckB?.id) === track.id) && "bg-primary/10",
-                  )}
-                >
-                  <TrackArtwork artworkUrl={track.artworkUrl} className="size-9 rounded-lg" size={48} iconSize={15} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-xs font-medium">{track.title}</span>
-                    <span className="block truncate text-[10px] text-muted-foreground">{track.artist}</span>
-                  </span>
-                  <span className="text-[9px] font-bold text-muted-foreground">
-                    {showDeckPicker === "A" && deckA?.id === track.id ? "ACTIVE" : showDeckPicker === "B" && deckB?.id === track.id ? "CUED" : "LOAD"}
-                  </span>
-                </button>
-              ))}
-              {!session.queue.length && (
-                <div className="py-6 text-center text-xs text-muted-foreground">
-                  Add tracks to the main Zuno queue first.
-                </div>
-              )}
-            </div>
-          </div>
+          <DeckPicker
+            side={showDeckPicker}
+            deckAId={deckA?.id ?? null}
+            deckBId={deckB?.id ?? null}
+            onPick={pickFromDeckPicker}
+            onClose={closeDeckPicker}
+          />
         )}
-
-        <div className="mt-4 rounded-2xl bg-card/60 p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="text-xs font-bold tracking-widest">DECK B QUICK LOAD</div>
-            <div className="text-[10px] text-muted-foreground">Choose a track to prepare</div>
-          </div>
-          <div className="grid gap-1">
-            {nextTracks.map((track) => (
-              <button
-                key={track.id}
-                type="button"
-                onClick={() => selectDeckB(track)}
-                className={cn(
-                  "flex items-center gap-3 rounded-xl px-3 py-2 text-left hover:bg-white/5",
-                  deckB?.id === track.id && "bg-primary/10",
-                )}
-              >
-                <TrackArtwork artworkUrl={track.artworkUrl} className="size-9 rounded-lg" size={48} iconSize={15} />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs font-medium">{track.title}</span>
-                  <span className="block truncate text-[10px] text-muted-foreground">{track.artist}</span>
-                </span>
-                <SkipNextIcon size={14} className="text-muted-foreground" />
-              </button>
-            ))}
-            {!nextTracks.length && (
-              <div className="py-6 text-center text-xs text-muted-foreground">Add more tracks to the queue to populate Deck B.</div>
-            )}
-          </div>
-        </div>
+        <DeckBQuickLoad
+          deckAId={deckA?.id ?? null}
+          deckBId={deckB?.id ?? null}
+          onPick={selectDeckB}
+        />
       </div>
     </div>
   );
