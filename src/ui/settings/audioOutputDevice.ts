@@ -8,6 +8,7 @@ import { logInternalWarn } from "../../internal/logging";
 import { playerController } from "../../player/playerStore";
 import {
   listOutputDevices as invokeListOutputDevices,
+  setOutputChangedListener,
   setOutputDevice as pushOutputDevice,
   type OutputDevice,
 } from "../../player/rustAudio";
@@ -38,15 +39,40 @@ function read(): string | null {
 }
 
 /**
- * Pushes the choice down to Rust and, if the engine had a track loaded, reloads it — reopening
- * the stream drops both decks, the same loss `PlayerController.recoverFromPrematureEnd`
+ * Fired after the output stream was reopened and whatever was playing has been reloaded onto it.
+ * Anything that holds state on the engine's *standby* deck — DJ Mode's Deck B — listens for this,
+ * because the reopen emptied that deck and nothing outside it knows.
+ */
+export const OUTPUT_RESET_EVENT = "zuno-audio-output-reset";
+
+type SessionSnapshot = ReturnType<typeof playerController.getPlayerSession>;
+
+/**
+ * Reopening the stream drops both decks, the same loss `PlayerController.recoverFromPrematureEnd`
  * recovers from when a connection dies mid-track, reused here since a device switch empties the
- * decks the same way.
+ * decks the same way. Shared by a device picked in Settings and by Rust following a change of
+ * OS default, which end up in exactly the same place.
  *
  * ponytail: a paused track blips playing for an instant before pausing back down, rather than
  * teaching this a load-that-does-not-play path just for the one case where nothing was audible
  * anyway.
  */
+async function recoverPlayback(session: SessionSnapshot | null): Promise<void> {
+  if (!session) return;
+  // Before the reload, not after: the controller still believes the dropped decks are loaded, and
+  // `play` / `cueTrack` both skip work for a track they think is already there.
+  playerController.resetAfterOutputChange();
+
+  if (session.currentTrack && session.status !== "idle") {
+    const wasPlaying = session.status === "playing";
+    await playerController.playTrackById(session.currentTrack.id);
+    if (session.positionSec > 0) await playerController.seekTo(session.positionSec);
+    if (!wasPlaying) await playerController.pause();
+  }
+  window.dispatchEvent(new Event(OUTPUT_RESET_EVENT));
+}
+
+/** Pushes the choice down to Rust and, if the engine had a track loaded, reloads it. */
 async function push(id: string | null): Promise<void> {
   const session = usesRustAudioEngine() ? playerController.getPlayerSession() : null;
   try {
@@ -57,14 +83,18 @@ async function push(id: string | null): Promise<void> {
     });
     return;
   }
-
-  if (!session?.currentTrack || session.status === "idle") return;
-  const wasPlaying = session.status === "playing";
-  await playerController.playTrackById(session.currentTrack.id);
-  if (session.positionSec > 0) await playerController.seekTo(session.positionSec);
-  if (!wasPlaying) await playerController.pause();
+  await recoverPlayback(session);
 }
 
+/**
+ * Rust moved the stream to a new OS default (headphones plugged in, Bluetooth connected, a
+ * different output picked in the system tray) while this was set to "System default". The
+ * stream is already open on the new device; what is left is the decks it dropped.
+ */
+function recoverFromOutputChange(): void {
+  if (!usesRustAudioEngine()) return;
+  void recoverPlayback(playerController.getPlayerSession());
+}
 function subscribe(callback: () => void) {
   window.addEventListener(CHANGE_EVENT, callback);
   window.addEventListener("storage", callback);
@@ -86,6 +116,7 @@ export function setOutputDevice(id: string | null): void {
 
 export async function hydrateOutputDevice(): Promise<void> {
   await hydrateLocalJsonSetting(STORAGE_KEY, isDeviceId);
+  setOutputChangedListener(recoverFromOutputChange);
   // A fresh Rust process always opens the OS default until told otherwise, so the stored choice
   // has to be pushed down once at startup — nothing is loaded this early, so `push` just forwards
   // it.
