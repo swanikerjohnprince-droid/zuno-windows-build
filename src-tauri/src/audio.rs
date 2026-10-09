@@ -39,6 +39,10 @@ const TICK: Duration = Duration::from_millis(250);
 /// as stepping, and the thread is otherwise idle.
 const FADE_STEP: Duration = Duration::from_millis(20);
 
+/// How often the OS default output is compared against the one the stream was opened on. Often
+/// enough that plugging in headphones feels immediate, rare enough to cost nothing.
+const DEFAULT_DEVICE_POLL: Duration = Duration::from_secs(1);
+
 /// How long a decoder read waits for bytes that have not landed yet before giving up.
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 /// Poll interval while waiting on the download. Short enough to be inaudible.
@@ -567,6 +571,55 @@ fn our_sink_input_id() -> Option<u64> {
 }
 
 /**
+ * The id of whatever device the OS currently calls the default output, where that is something
+ * worth watching.
+ *
+ * `open_default_sink` resolves "the default" once, when the stream opens, and the stream then
+ * stays bound to that physical endpoint: on Windows (WASAPI) and macOS (CoreAudio) a later
+ * change of default — plugging in headphones, connecting Bluetooth, switching in the tray —
+ * does not move an already-open stream. Without this the app keeps playing out of the old
+ * device until it is restarted or a device is re-picked in Settings, even though the setting
+ * says "System default".
+ *
+ * Elsewhere the answer is `None`, which turns the watcher off: on Linux the sound server
+ * (PipeWire / PulseAudio) already re-routes a stream that follows the default, and cpal's
+ * default id there is a constant, so there would be nothing to detect anyway.
+ */
+#[cfg(any(windows, target_os = "macos"))]
+fn default_output_id() -> Option<String> {
+    use rodio::cpal::traits::HostTrait;
+    rodio::cpal::default_host()
+        .default_output_device()
+        .and_then(|device| device.id().ok())
+        .map(|id| id.to_string())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn default_output_id() -> Option<String> {
+    None
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DefaultDeviceAction {
+    /// Still the device the stream is on.
+    Keep,
+    /// Nothing was recorded at open (the id could not be read then), so there is no evidence the
+    /// default moved — record what it is now as the baseline. Reopening here would drop a
+    /// playing track on a guess.
+    Adopt,
+    /// The default is a different device from the one the stream was opened on.
+    Reopen,
+}
+
+fn default_device_action(opened: Option<&str>, current: &str) -> DefaultDeviceAction {
+    match opened {
+        None => DefaultDeviceAction::Adopt,
+        Some(previous) if previous == current => DefaultDeviceAction::Keep,
+        Some(_) => DefaultDeviceAction::Reopen,
+    }
+}
+
+/**
  * Opens the sink for `id`, or the OS default when `id` is `None`.
  *
  * A device id that no longer resolves — unplugged, a saved choice from a machine that changed
@@ -629,6 +682,10 @@ fn run(
     ready: Sender<Result<(), String>>,
     initial_device: Option<String>,
 ) {
+    // Read before opening, not after: if the default moves in between, the stream is on the
+    // newer one and the next check reopens once needlessly — the reverse order could record a
+    // device the stream is not on and never notice.
+    let opened_default = if initial_device.is_none() { default_output_id() } else { None };
     let stream = match open_device_sink(initial_device.as_deref()) {
         Ok(stream) => stream,
         Err(error) => {
@@ -664,6 +721,9 @@ fn run(
         rate: 1.0,
         playing: false,
         fade: None,
+        device_request: initial_device,
+        opened_default,
+        next_default_check: Instant::now() + DEFAULT_DEVICE_POLL,
     };
 
     if ready.send(Ok(())).is_err() {
@@ -693,6 +753,7 @@ fn run(
             engine.tick();
             next_tick = Instant::now() + TICK;
         }
+        engine.follow_default_device();
     }
 }
 
@@ -707,6 +768,13 @@ struct Engine {
     rate: f32,
     playing: bool,
     fade: Option<Fade>,
+    /// What the stream was asked to open: a specific device id, or `None` for "System default".
+    /// Only the latter follows the OS default — an explicit choice stays put.
+    device_request: Option<String>,
+    /// The OS default's id at the moment the stream opened. Meaningful only while
+    /// `device_request` is `None`.
+    opened_default: Option<String>,
+    next_default_check: Instant,
 }
 
 impl Engine {
@@ -941,41 +1009,93 @@ impl Engine {
                 self.decks[self.active].clear();
                 self.playing = false;
             }
-            Command::SetOutputDevice { id, reply } => match open_device_sink(id.as_deref()) {
-                Ok(stream) => {
-                    let decks = [
-                        Deck {
-                            sink: Player::connect_new(stream.mixer()),
-                            track_id: None,
-                            duration_sec: 0.0,
-                            health: None,
-                        },
-                        Deck {
-                            sink: Player::connect_new(stream.mixer()),
-                            track_id: None,
-                            duration_sec: 0.0,
-                            health: None,
-                        },
-                    ];
-                    for deck in &decks {
-                        deck.sink.pause();
+            Command::SetOutputDevice { id, reply } => {
+                let default_before = if id.is_none() { default_output_id() } else { None };
+                match open_device_sink(id.as_deref()) {
+                    Ok(stream) => {
+                        self.replace_stream(stream);
+                        self.device_request = id;
+                        self.opened_default = default_before;
+                        let _ = reply.send(Ok(()));
                     }
-                    // Both old decks go with the old stream, so a fade referencing them would
-                    // be stale — dropped rather than settled through `cancel_fade`, which would
-                    // write a volume to a deck this is about to discard anyway.
-                    self.fade = None;
-                    self._stream = stream;
-                    self.decks = decks;
-                    self.active = 0;
-                    self.playing = false;
-                    let _ = reply.send(Ok(()));
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Swaps in a freshly opened stream. Both old decks go with the old stream, so everything
+    /// that referred to them is reset: the caller reloads whatever was playing.
+    fn replace_stream(&mut self, stream: MixerDeviceSink) {
+        let decks = [
+            Deck {
+                sink: Player::connect_new(stream.mixer()),
+                track_id: None,
+                duration_sec: 0.0,
+                health: None,
+            },
+            Deck {
+                sink: Player::connect_new(stream.mixer()),
+                track_id: None,
+                duration_sec: 0.0,
+                health: None,
+            },
+        ];
+        for deck in &decks {
+            deck.sink.pause();
+        }
+        // A fade referencing the old decks would be stale — dropped rather than settled through
+        // `cancel_fade`, which would write a volume to a deck this is about to discard anyway.
+        self.fade = None;
+        self._stream = stream;
+        self.decks = decks;
+        self.active = 0;
+        self.playing = false;
+    }
+
+    /**
+     * Moves the stream to the new OS default when the user is on "System default" and the
+     * default has changed. See `default_output_id` for why a stream does not do this itself.
+     *
+     * The frontend is told afterwards, because the reopen empties both decks exactly as a manual
+     * device switch does — `native-audio-output-changed` triggers the same reload-and-resume.
+     */
+    fn follow_default_device(&mut self) {
+        if self.device_request.is_some() {
+            return;
+        }
+        let now = Instant::now();
+        if now < self.next_default_check {
+            return;
+        }
+        self.next_default_check = now + DEFAULT_DEVICE_POLL;
+
+        let Some(current) = default_output_id() else { return };
+        match default_device_action(self.opened_default.as_deref(), &current) {
+            DefaultDeviceAction::Keep => {}
+            DefaultDeviceAction::Adopt => self.opened_default = Some(current),
+            DefaultDeviceAction::Reopen => match open_device_sink(None) {
+                Ok(stream) => {
+                    eprintln!(
+                        "[internal][tauri][info] native_audio default output changed, reopened stream"
+                    );
+                    self.replace_stream(stream);
+                    self.opened_default = Some(current);
+                    let _ = self.app.emit("native-audio-output-changed", ());
                 }
                 Err(error) => {
-                    let _ = reply.send(Err(error));
+                    // A device that has only just appeared is often not openable for a moment;
+                    // back off rather than retrying (and logging) every second.
+                    eprintln!(
+                        "[internal][tauri][warn] native_audio could not follow default output: {error}"
+                    );
+                    self.next_default_check = now + Duration::from_secs(5);
                 }
             },
         }
-        false
     }
 
     fn cancel_fade(&mut self) {
@@ -1042,5 +1162,28 @@ impl Engine {
                 duration_sec: self.decks[index].duration_sec,
             },
         );
+    }
+}
+
+
+#[cfg(test)]
+mod default_device_tests {
+    use super::{default_device_action, DefaultDeviceAction};
+
+    #[test]
+    fn same_default_is_left_alone() {
+        assert_eq!(default_device_action(Some("speakers"), "speakers"), DefaultDeviceAction::Keep);
+    }
+
+    #[test]
+    fn a_new_default_reopens_the_stream() {
+        assert_eq!(default_device_action(Some("speakers"), "headphones"), DefaultDeviceAction::Reopen);
+    }
+
+    /// If the default could not be read when the stream opened, a first successful read is a
+    /// baseline, not a change — reopening on it would cut off playback on a guess.
+    #[test]
+    fn an_unknown_starting_point_is_adopted_not_acted_on() {
+        assert_eq!(default_device_action(None, "speakers"), DefaultDeviceAction::Adopt);
     }
 }
