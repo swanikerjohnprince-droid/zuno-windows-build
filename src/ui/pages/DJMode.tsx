@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { Track } from "../../datasource/types";
 import { usePlayerSessionSelector, type PlayerControllerActions } from "../../player/playerStore";
 import type { PlayerSession } from "../../player/PlayerController";
@@ -6,7 +7,7 @@ import { TrackArtwork } from "../components/TrackArtwork";
 import { cn } from "@/lib/utils";
 import { OUTPUT_RESET_EVENT } from "../settings/audioOutputDevice";
 import { Marquee } from "@/components/motion/marquee";
-import { PlayIcon, PauseIcon, SkipNextIcon, MusicNoteIcon, ArrowRightIcon } from "@/ui/icons";
+import { PlayIcon, PauseIcon, MusicNoteIcon, ArrowRightIcon } from "@/ui/icons";
 
 /** Bounds for the operator-adjustable "MIX A → B" transition length, in seconds. */
 const MIN_TRANSITION_SEC = 1;
@@ -357,9 +358,9 @@ function Deck({
   onCue,
   onSeek,
   onHotCue,
-  onLoad,
   onTrim,
   hotCues,
+  dragState,
 }: {
   side: "A" | "B";
   track: Track | null;
@@ -375,19 +376,41 @@ function Deck({
   onCue: () => void;
   onSeek: (value: number) => void;
   onHotCue: (index: number) => void;
-  onLoad: () => void;
   onTrim: (value: number) => void;
   hotCues: (number | null)[];
+  /** A queue track is being dragged: null = no drag, otherwise which deck (if any) it is over. */
+  dragState: DragTarget;
 }) {
+  const dragging = dragState !== null;
+  const isDropTarget = dragState === side;
 
   return (
-    <section className="min-w-0 flex-1 rounded-2xl bg-card/80 p-4 shadow-2xl shadow-black/20">
+    <section
+      data-deck-drop={side}
+      className={cn(
+        "relative min-w-0 flex-1 rounded-2xl bg-card/80 p-4 shadow-2xl shadow-black/20 transition-shadow",
+        dragging && "ring-2 ring-primary/30",
+        isDropTarget && "bg-primary/10 ring-primary",
+      )}
+    >
+      {dragging && (
+        // Covers the deck while a track is being dragged so the target is unmistakable, and is
+        // pointer-events-none so hit-testing still lands on the section underneath.
+        <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl bg-background/60">
+          <span className={cn(
+            "rounded-full px-4 py-2 text-xs font-bold tracking-widest",
+            isDropTarget ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground",
+          )}>
+            {isDropTarget ? `RELEASE TO LOAD ON DECK ${side}` : `DROP ON DECK ${side}`}
+          </span>
+        </div>
+      )}
       <div className="mb-4 flex items-center justify-between gap-3">
         {/*
           min-w-0 is what lets ScrollingText ever see an overflow: a flex item will not shrink
           below the width of its content, and until the title is known to overflow it is still
           laid out in flow — so without this the column just grows to the full title, nothing
-          overflows, nothing scrolls, and the header pushes the TRIM/LOAD controls out instead.
+          overflows, nothing scrolls, and the header pushes the TRIM control out instead.
         */}
         <div className="min-w-0">
           <div className="text-[10px] font-bold tracking-[0.22em] text-primary">DECK {side}</div>
@@ -408,9 +431,6 @@ function Deck({
               className="w-16 accent-[var(--color-primary)]"
             />
           </label>
-          <button type="button" onClick={onLoad} className="rounded-lg bg-primary/15 px-2 py-1 font-bold text-primary hover:bg-primary/25">
-            LOAD
-          </button>
         </div>
       </div>
 
@@ -481,183 +501,293 @@ function useStableQueue(): Track[] {
   return usePlayerSessionSelector(selectQueue, sameTracks);
 }
 
-type TrackRowVariant = "queue" | "picker" | "quick";
+/**
+ * Where a queue track being dragged currently is: `null` when nothing is being dragged, `"none"`
+ * while dragging over empty space, otherwise the deck under the pointer. One value instead of a
+ * flag plus a target keeps the page to a re-render when a drag starts, ends, or crosses a deck —
+ * not on every pointer move, which stays inside `DjQueue`.
+ */
+type DragTarget = "A" | "B" | "none" | null;
 
-const TrackListRow = memo(function TrackListRow({
+const DRAG_THRESHOLD_PX = 6;
+const EDGE_SCROLL_ZONE_PX = 56;
+const EDGE_SCROLL_MAX_STEP_PX = 16;
+
+function deckUnderPoint(x: number, y: number): "A" | "B" | null {
+  const side = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-deck-drop]")?.dataset.deckDrop;
+  return side === "A" || side === "B" ? side : null;
+}
+
+const DECK_BUTTON =
+  "grid size-7 place-items-center rounded-lg text-[11px] font-bold transition-colors";
+
+const QueueRow = memo(function QueueRow({
   track,
-  variant,
-  index = 0,
-  active,
-  label,
-  onPick,
+  index,
+  isA,
+  isB,
+  playing,
+  onPress,
+  onLoadA,
+  onLoadB,
 }: {
   track: Track;
-  variant: TrackRowVariant;
-  index?: number;
-  active: boolean;
-  label?: string;
-  onPick: (track: Track) => void;
+  index: number;
+  isA: boolean;
+  isB: boolean;
+  playing: boolean;
+  onPress: (event: React.PointerEvent<HTMLElement>, track: Track) => void;
+  onLoadA: (track: Track) => void;
+  onLoadB: (track: Track) => void;
 }) {
+  const status = isA ? (playing ? "PLAYING" : "LOADED") : isB ? "CUED" : null;
   return (
-    <button
-      type="button"
-      onClick={() => onPick(track)}
+    <div
+      onPointerDown={(event) => onPress(event, track)}
+      // The artwork is an <img>, which the browser would otherwise start dragging natively —
+      // cancelling the pointer stream this row's own drag depends on.
+      onDragStart={(event) => event.preventDefault()}
+      // pan-y keeps the list scrollable by touch; only the grip below opts out of that.
+      style={{ touchAction: "pan-y" }}
       className={cn(
-        "flex items-center gap-3 rounded-xl px-3 py-2 text-left hover:bg-white/5",
-        variant === "queue" && "w-full",
-        active && (variant === "queue" ? "bg-primary/10 ring-1 ring-primary/20" : "bg-primary/10"),
+        "flex cursor-grab select-none items-center gap-3 rounded-xl px-3 py-2 hover:bg-white/5 active:cursor-grabbing",
+        (isA || isB) && "bg-primary/10 ring-1 ring-primary/20",
       )}
     >
-      {variant === "queue" && (
-        <span className="w-5 text-center text-[10px] font-bold text-muted-foreground">{index + 1}</span>
-      )}
+      <span
+        data-drag-handle
+        aria-hidden="true"
+        style={{ touchAction: "none" }}
+        className="grid size-6 shrink-0 place-items-center text-muted-foreground/60"
+      >
+        <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor">
+          <circle cx="2" cy="2" r="1.2" /><circle cx="8" cy="2" r="1.2" />
+          <circle cx="2" cy="7" r="1.2" /><circle cx="8" cy="7" r="1.2" />
+          <circle cx="2" cy="12" r="1.2" /><circle cx="8" cy="12" r="1.2" />
+        </svg>
+      </span>
+      <span className="w-5 text-center text-[10px] font-bold text-muted-foreground">{index + 1}</span>
       <TrackArtwork artworkUrl={track.artworkUrl} className="size-9 rounded-lg" size={48} iconSize={15} />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-xs font-medium">{track.title}</span>
         <span className="block truncate text-[10px] text-muted-foreground">{track.artist}</span>
       </span>
-      {variant === "quick" ? (
-        <SkipNextIcon size={14} className="text-muted-foreground" />
-      ) : (
-        <span className="text-[9px] font-bold text-muted-foreground">{label}</span>
-      )}
-    </button>
-  );
-});
-
-/*
- * The three track lists below used to be inline in DJMode, so the deck clocks (a state update
- * every 50-80ms) re-rendered every row of every list — each with its own artwork component —
- * up to ~25 times a second. They are separate memoised components now: they read the queue
- * themselves and take only primitives and stable callbacks, so a clock tick never reaches them.
- */
-const DeckAQueueList = memo(function DeckAQueueList({
-  deckAId,
-  playing,
-  onLoad,
-}: {
-  deckAId: string | null;
-  playing: boolean;
-  onLoad: (track: Track) => void;
-}) {
-  const queue = useStableQueue();
-  return (
-    <div className="mt-4 rounded-2xl bg-card/60 p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <div>
-          <div className="text-xs font-bold tracking-widest">DECK A QUEUE</div>
-          <div className="text-[10px] text-muted-foreground">Your main Zuno queue stays here while DJ Mode is open.</div>
-        </div>
-        <span className="rounded-full bg-muted px-2 py-1 text-[9px] font-bold text-muted-foreground">{queue.length} TRACKS</span>
-      </div>
-      <div className="max-h-56 overflow-auto pr-1">
-        {queue.map((track, index) => {
-          const active = deckAId === track.id;
-          return (
-            <TrackListRow
-              key={track.id}
-              track={track}
-              variant="queue"
-              index={index}
-              active={active}
-              label={active ? (playing ? "PLAYING" : "LOADED") : "LOAD"}
-              onPick={onLoad}
-            />
-          );
-        })}
-        {!queue.length && <div className="py-6 text-center text-xs text-muted-foreground">Add tracks to the main Zuno queue.</div>}
-      </div>
-    </div>
-  );
-});
-
-const DeckPicker = memo(function DeckPicker({
-  side,
-  deckAId,
-  deckBId,
-  onPick,
-  onClose,
-}: {
-  side: "A" | "B";
-  deckAId: string | null;
-  deckBId: string | null;
-  onPick: (track: Track) => void;
-  onClose: () => void;
-}) {
-  const queue = useStableQueue();
-  const selectedId = side === "A" ? deckAId : deckBId;
-  return (
-    <div className="mt-4 rounded-2xl bg-card/60 p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <div>
-          <div className="text-xs font-bold tracking-widest">LOAD ON DECK {side}</div>
-          <div className="text-[10px] text-muted-foreground">
-            {side === "A" ? "Load a track as the active deck" : "Choose a track to prepare"}
-          </div>
-        </div>
+      {status && <span className="text-[9px] font-bold text-primary">{status}</span>}
+      <div className="flex shrink-0 gap-1">
         <button
           type="button"
-          onClick={onClose}
-          className="rounded-lg bg-white/5 px-3 py-1 text-[10px] hover:bg-white/10"
+          disabled={isA}
+          onClick={() => onLoadA(track)}
+          aria-label={`Load ${track.title} on Deck A`}
+          title={isA ? "Already on Deck A" : "Load on Deck A"}
+          className={cn(
+            DECK_BUTTON,
+            isA
+              ? "bg-primary text-primary-foreground"
+              : "bg-muted text-muted-foreground hover:bg-primary hover:text-primary-foreground",
+          )}
         >
-          CLOSE
+          A
         </button>
-      </div>
-      <div className="grid gap-1">
-        {queue.map((track) => {
-          const active = selectedId === track.id;
-          return (
-            <TrackListRow
-              key={track.id}
-              track={track}
-              variant="picker"
-              active={active}
-              label={active ? (side === "A" ? "ACTIVE" : "CUED") : "LOAD"}
-              onPick={onPick}
-            />
-          );
-        })}
-        {!queue.length && (
-          <div className="py-6 text-center text-xs text-muted-foreground">
-            Add tracks to the main Zuno queue first.
-          </div>
-        )}
+        <button
+          type="button"
+          // A track cannot be on both decks: the one on Deck A is not offered to Deck B.
+          disabled={isA || isB}
+          onClick={() => onLoadB(track)}
+          aria-label={`Load ${track.title} on Deck B`}
+          title={isA ? "This track is on Deck A" : isB ? "Already on Deck B" : "Load on Deck B"}
+          className={cn(
+            DECK_BUTTON,
+            isB
+              ? "bg-primary text-primary-foreground"
+              : isA
+                ? "cursor-not-allowed bg-muted/40 text-muted-foreground/40"
+                : "bg-muted text-muted-foreground hover:bg-primary hover:text-primary-foreground",
+          )}
+        >
+          B
+        </button>
       </div>
     </div>
   );
 });
 
-const DeckBQuickLoad = memo(function DeckBQuickLoad({
+/**
+ * The one queue, in place of the old Deck A queue, "load on deck" picker and Deck B quick-load
+ * list — all three were the same list of the same tracks, differing only in which deck a click
+ * sent it to. Now each row says so itself: an A and a B button, or drag the row onto a deck.
+ *
+ * Dragging is pointer-event based, like the sidebar's reordering, and deliberately not HTML5
+ * drag-and-drop: with Tauri's file-drop handling left on (its default), WebView2 on Windows
+ * never delivers the HTML5 drag events inside the page, and touch screens do not either. Pointer
+ * events work in both. The drag position lives in this component, not in `DJMode`, so a drag does
+ * not re-render the decks and their clocks on every pointer move.
+ */
+const DjQueue = memo(function DjQueue({
   deckAId,
   deckBId,
-  onPick,
+  playing,
+  scrollRef,
+  onLoadA,
+  onLoadB,
+  onDragTarget,
 }: {
   deckAId: string | null;
   deckBId: string | null;
-  onPick: (track: Track) => void;
+  playing: boolean;
+  scrollRef: React.RefObject<HTMLElement | null>;
+  onLoadA: (track: Track) => void;
+  onLoadB: (track: Track) => void;
+  onDragTarget: (target: DragTarget) => void;
 }) {
   const queue = useStableQueue();
-  const nextTracks = useMemo(() => queue.filter((track) => track.id !== deckAId), [queue, deckAId]);
+  const [ghost, setGhost] = useState<{ track: Track; x: number; y: number; over: "A" | "B" | null } | null>(null);
+  const teardownRef = useRef<(() => void) | null>(null);
+
+  // Closing DJ Mode mid-drag must not leave window listeners attached, or the cursor and text
+  // selection locked the way a drag sets them.
+  useEffect(() => () => teardownRef.current?.(), []);
+
+  const onPress = useCallback((event: React.PointerEvent<HTMLElement>, track: Track) => {
+    if (event.button !== 0 || teardownRef.current) return;
+    const target = event.target as HTMLElement;
+    // A and B buttons are clicks, not drag handles.
+    if (target.closest("button")) return;
+    // By touch only the grip starts a drag, so the rest of the row still scrolls the list.
+    if (event.pointerType === "touch" && !target.closest("[data-drag-handle]")) return;
+
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let x = startX;
+    let y = startY;
+    let dragging = false;
+    let over: "A" | "B" | null = null;
+    let frame = 0;
+
+    const updateOver = () => {
+      const next = deckUnderPoint(x, y);
+      if (next === over) return;
+      over = next;
+      onDragTarget(next ?? "none");
+    };
+
+    // The decks sit above the queue, so a long page needs scrolling mid-drag. Also re-tests what
+    // is under the pointer each frame: scrolling moves a deck under a pointer that is not moving.
+    const autoScroll = () => {
+      const container = scrollRef.current;
+      if (container) {
+        const rect = container.getBoundingClientRect();
+        if (y < rect.top + EDGE_SCROLL_ZONE_PX) {
+          container.scrollTop -= Math.min(EDGE_SCROLL_MAX_STEP_PX, Math.ceil((rect.top + EDGE_SCROLL_ZONE_PX - y) / 3));
+        } else if (y > rect.bottom - EDGE_SCROLL_ZONE_PX) {
+          container.scrollTop += Math.min(EDGE_SCROLL_MAX_STEP_PX, Math.ceil((y - (rect.bottom - EDGE_SCROLL_ZONE_PX)) / 3));
+        }
+        updateOver();
+        setGhost((current) => (current && current.over !== over ? { ...current, over } : current));
+      }
+      frame = requestAnimationFrame(autoScroll);
+    };
+
+    const move = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      x = moveEvent.clientX;
+      y = moveEvent.clientY;
+      if (!dragging) {
+        // Below the threshold this is still a click or a text-select attempt, not a drag.
+        if (Math.hypot(x - startX, y - startY) < DRAG_THRESHOLD_PX) return;
+        dragging = true;
+        document.body.style.userSelect = "none";
+        document.body.style.cursor = "grabbing";
+        onDragTarget("none");
+        frame = requestAnimationFrame(autoScroll);
+      }
+      updateOver();
+      setGhost({ track, x, y, over });
+    };
+
+    const finish = (commit: boolean) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("keydown", key);
+      cancelAnimationFrame(frame);
+      teardownRef.current = null;
+      if (!dragging) return;
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      setGhost(null);
+      onDragTarget(null);
+      if (commit && over) (over === "A" ? onLoadA : onLoadB)(track);
+    };
+    const up = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId === pointerId) finish(true);
+    };
+    const cancel = (cancelEvent: PointerEvent) => {
+      if (cancelEvent.pointerId === pointerId) finish(false);
+    };
+    const key = (keyEvent: KeyboardEvent) => {
+      if (keyEvent.key === "Escape") finish(false);
+    };
+
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("keydown", key);
+    teardownRef.current = () => finish(false);
+  }, [onDragTarget, onLoadA, onLoadB, scrollRef]);
+
   return (
-    <div className="mt-4 rounded-2xl bg-card/60 p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <div className="text-xs font-bold tracking-widest">DECK B QUICK LOAD</div>
-        <div className="text-[10px] text-muted-foreground">Choose a track to prepare</div>
+    <div className="flex max-h-[30rem] min-w-0 flex-col rounded-2xl bg-card/60 p-4">
+      <div className="mb-3 flex shrink-0 items-center justify-between gap-3">
+        <div>
+          <div className="text-xs font-bold tracking-widest">QUEUE</div>
+          <div className="text-[10px] text-muted-foreground">
+            Drag a track onto a deck, or press A / B to load it. Your main Zuno queue stays here.
+          </div>
+        </div>
+        <span className="shrink-0 rounded-full bg-muted px-2 py-1 text-[9px] font-bold text-muted-foreground">
+          {queue.length} TRACKS
+        </span>
       </div>
-      <div className="grid gap-1">
-        {nextTracks.map((track) => (
-          <TrackListRow
+      <div className="min-h-0 flex-1 overflow-auto pr-1">
+        {queue.map((track, index) => (
+          <QueueRow
             key={track.id}
             track={track}
-            variant="quick"
-            active={deckBId === track.id}
-            onPick={onPick}
+            index={index}
+            isA={deckAId === track.id}
+            isB={deckBId === track.id}
+            playing={playing}
+            onPress={onPress}
+            onLoadA={onLoadA}
+            onLoadB={onLoadB}
           />
         ))}
-        {!nextTracks.length && (
-          <div className="py-6 text-center text-xs text-muted-foreground">Add more tracks to the queue to populate Deck B.</div>
+        {!queue.length && (
+          <div className="py-6 text-center text-xs text-muted-foreground">Add tracks to the main Zuno queue.</div>
         )}
       </div>
+      {ghost && createPortal(
+        // In a portal on <body>: DJ Mode sits inside overflow-hidden, possibly transformed,
+        // ancestors, which would clip a fixed-position ghost or anchor it to the wrong box.
+        <div
+          className="pointer-events-none fixed z-[200] flex w-60 items-center gap-2 rounded-xl bg-card px-3 py-2 shadow-2xl ring-1 ring-primary/40"
+          style={{ left: ghost.x + 14, top: ghost.y + 14 }}
+        >
+          <TrackArtwork artworkUrl={ghost.track.artworkUrl} className="size-8 rounded-md" size={40} iconSize={14} />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-xs font-semibold">{ghost.track.title}</span>
+            <span className="block truncate text-[10px] text-muted-foreground">{ghost.track.artist}</span>
+          </span>
+          {ghost.over && (
+            <span className="rounded-md bg-primary px-1.5 py-0.5 text-[9px] font-bold text-primary-foreground">
+              → DECK {ghost.over}
+            </span>
+          )}
+        </div>,
+        document.body,
+      )}
     </div>
   );
 });
@@ -676,7 +806,10 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   const [deckAPosition, setDeckAPosition] = useState(0);
   const [hotCuesA, setHotCuesA] = useState<(number | null)[]>([null, null, null, null]);
   const [hotCuesB, setHotCuesB] = useState<(number | null)[]>([null, null, null, null]);
-  const [showDeckPicker, setShowDeckPicker] = useState<"A" | "B" | null>(null);
+  // Which deck a dragged queue track is over (null: nothing is being dragged). See DragTarget.
+  const [dragTarget, setDragTarget] = useState<DragTarget>(null);
+  // The scrolling page body, so a drag near its top or bottom edge can scroll it.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
   const [trimA, setTrimA] = useState(1);
   const [trimB, setTrimB] = useState(1);
   const [transitionSec, setTransitionSec] = useState(DEFAULT_TRANSITION_SEC);
@@ -926,12 +1059,16 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     void playerController.loadTrack(track, true);
     setDeckAPosition(0);
   }, [playerController]);
-  const closeDeckPicker = useCallback(() => setShowDeckPicker(null), []);
-  const pickFromDeckPicker = useCallback((track: Track) => {
-    if (showDeckPicker === "A") loadOnDeckA(track);
-    else selectDeckB(track);
-    setShowDeckPicker(null);
-  }, [showDeckPicker, loadOnDeckA, selectDeckB]);
+  // A track cannot be on both decks; if the very same track were sent to Deck B while it is on
+  // Deck A, the "keep Deck B different" effect would immediately swap it for something else,
+  // which would look like the load silently doing the wrong thing. Read through a ref so the
+  // callback keeps one identity and the memoised queue rows are not re-rendered by it.
+  const deckAIdRef = useRef<string | null>(null);
+  deckAIdRef.current = deckA?.id ?? null;
+  const loadOnDeckB = useCallback((track: Track) => {
+    if (track.id === deckAIdRef.current) return;
+    selectDeckB(track);
+  }, [selectDeckB]);
 
   /**
    * The headline DJ move: hand playback from the active deck straight to the cued Deck B over
@@ -994,22 +1131,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
         <button type="button" onClick={onClose} className="rounded-lg bg-white/5 px-3 py-2 text-xs hover:bg-white/10">Exit DJ</button>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-auto p-4">
-        <div className="mb-4 flex items-center gap-3">
-          <div className="min-w-0 flex-1 rounded-xl bg-white/5 px-4 py-3">
-            <div className="text-[10px] font-bold tracking-widest text-muted-foreground">DECK A</div>
-            <ScrollingText className="text-sm font-bold">{deckA?.title ?? "No track playing"}</ScrollingText>
-          </div>
-          <div className="rounded-xl bg-white/5 px-4 py-3 text-center">
-            <div className="text-[10px] font-bold tracking-widest text-muted-foreground">CROSSFADER</div>
-            <div className="text-xl font-bold">{Math.round(crossfader)}%</div>
-          </div>
-          <div className="min-w-0 flex-1 rounded-xl bg-white/5 px-4 py-3 text-right">
-            <div className="text-[10px] font-bold tracking-widest text-muted-foreground">DECK B</div>
-            <ScrollingText className="text-sm font-bold">{deckB?.title ?? "Load a track"}</ScrollingText>
-          </div>
-        </div>
-
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-4">
         <div className="flex min-h-0 flex-col gap-4 @3xl/djmode:flex-row">
           <Deck
             side="A"
@@ -1025,9 +1147,9 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             onCue={() => void playerController.seekTo(hotCuesA[0] ?? 0)}
             onSeek={(value) => void playerController.seekTo(value)}
             onHotCue={(i) => setCue("A", i)}
-            onLoad={() => setShowDeckPicker("A")}
             onTrim={(value) => applyTrim("A", value)}
             hotCues={hotCuesA}
+            dragState={dragTarget}
           />
           <Deck
             side="B"
@@ -1058,91 +1180,90 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
               }
             }}
             onHotCue={(i) => setCue("B", i)}
-            onLoad={() => setShowDeckPicker("B")}
             onTrim={(value) => applyTrim("B", value)}
             hotCues={hotCuesB}
+            dragState={dragTarget}
           />
         </div>
 
-        <div className="mt-4 rounded-2xl bg-card/60 p-5">
-          <div className="mb-2 flex items-center justify-between">
-            <div className="text-xs font-bold tracking-widest">MIXER</div>
-            <div className="text-[10px] text-muted-foreground">A ← Crossfader → B</div>
-          </div>
-          <input
-            aria-label="Crossfader"
-            type="range"
-            min={0}
-            max={100}
-            value={crossfader}
-            disabled={isMixing}
-            onChange={(event) => applyCrossfader(Number(event.target.value))}
-            className="w-full accent-[var(--color-primary)]"
-          />
-          <div className="mt-1 flex justify-between text-[9px] font-bold text-muted-foreground">
-            <span>DECK A</span><span>CENTER MIX</span><span>DECK B</span>
-          </div>
-          <p className="mt-3 text-[10px] text-muted-foreground">
-            Both decks can play at the same time. Move the crossfader left/right to blend or switch between them,
-            or let MIX A → B do it for you with the native engine's real crossfade.
-          </p>
+        {/* The mixer takes one half, the queue the other; they stack when the panel is narrow. */}
+        <div className="mt-4 grid items-stretch gap-4 @3xl/djmode:grid-cols-2">
+          <div className="min-w-0 rounded-2xl bg-card/60 p-5">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold tracking-widest">MIXER</div>
+                <div className="text-[10px] text-muted-foreground">A ← Crossfader → B</div>
+              </div>
+              <div className="shrink-0 rounded-xl bg-white/5 px-4 py-2 text-center">
+                <div className="text-[10px] font-bold tracking-widest text-muted-foreground">CROSSFADER</div>
+                <div className="text-xl font-bold tabular-nums">{Math.round(crossfader)}%</div>
+              </div>
+            </div>
+            <input
+              aria-label="Crossfader"
+              type="range"
+              min={0}
+              max={100}
+              value={crossfader}
+              disabled={isMixing}
+              onChange={(event) => applyCrossfader(Number(event.target.value))}
+              className="w-full accent-[var(--color-primary)]"
+            />
+            <div className="mt-1 flex justify-between text-[9px] font-bold text-muted-foreground">
+              <span>DECK A</span><span>CENTER MIX</span><span>DECK B</span>
+            </div>
+            <p className="mt-3 text-[10px] text-muted-foreground">
+              Both decks can play at the same time. Move the crossfader left/right to blend or switch between them,
+              or let MIX A → B do it for you with the native engine's real crossfade.
+            </p>
 
-          <div className="mt-4 flex items-center gap-3 border-t border-white/5 pt-4">
-            <button
-              type="button"
-              onClick={() => void mixAtoB()}
-              disabled={!canMix}
-              className={cn(
-                "flex shrink-0 items-center gap-1.5 rounded-xl px-4 py-2.5 text-xs font-bold tracking-wide",
-                canMix
-                  ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:bg-primary/90"
-                  : "cursor-not-allowed bg-muted text-muted-foreground",
-              )}
-            >
-              {isMixing ? "MIXING…" : "MIX A"}
-              <ArrowRightIcon size={13} />
-              {isMixing ? "" : "B"}
-            </button>
-            <label className="flex flex-1 items-center gap-2 text-[10px] font-semibold text-muted-foreground">
-              <span className="shrink-0 tracking-widest">TRANSITION</span>
-              <input
-                aria-label="Transition length"
-                type="range"
-                min={MIN_TRANSITION_SEC}
-                max={MAX_TRANSITION_SEC}
-                step={1}
-                value={transitionSec}
-                onChange={(event) => setTransitionSec(Number(event.target.value))}
-                disabled={isMixing}
-                className="w-full accent-[var(--color-primary)]"
-              />
-              <span className="w-6 shrink-0 text-right text-foreground">{transitionSec}s</span>
-            </label>
+            <div className="mt-4 flex items-center gap-3 border-t border-white/5 pt-4">
+              <button
+                type="button"
+                onClick={() => void mixAtoB()}
+                disabled={!canMix}
+                className={cn(
+                  "flex shrink-0 items-center gap-1.5 rounded-xl px-4 py-2.5 text-xs font-bold tracking-wide",
+                  canMix
+                    ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20 hover:bg-primary/90"
+                    : "cursor-not-allowed bg-muted text-muted-foreground",
+                )}
+              >
+                {isMixing ? "MIXING…" : "MIX A"}
+                <ArrowRightIcon size={13} />
+                {isMixing ? "" : "B"}
+              </button>
+              <label className="flex flex-1 items-center gap-2 text-[10px] font-semibold text-muted-foreground">
+                <span className="shrink-0 tracking-widest">TRANSITION</span>
+                <input
+                  aria-label="Transition length"
+                  type="range"
+                  min={MIN_TRANSITION_SEC}
+                  max={MAX_TRANSITION_SEC}
+                  step={1}
+                  value={transitionSec}
+                  onChange={(event) => setTransitionSec(Number(event.target.value))}
+                  disabled={isMixing}
+                  className="w-full accent-[var(--color-primary)]"
+                />
+                <span className="w-6 shrink-0 text-right text-foreground">{transitionSec}s</span>
+              </label>
+            </div>
+            {!deckB && (
+              <p className="mt-2 text-[10px] text-muted-foreground">Load a track on Deck B to enable MIX A → B.</p>
+            )}
           </div>
-          {!deckB && (
-            <p className="mt-2 text-[10px] text-muted-foreground">Load a track on Deck B to enable MIX A → B.</p>
-          )}
-        </div>
 
-        <DeckAQueueList
-          deckAId={deckA?.id ?? null}
-          playing={session.status === "playing"}
-          onLoad={loadOnDeckA}
-        />
-        {showDeckPicker && (
-          <DeckPicker
-            side={showDeckPicker}
+          <DjQueue
             deckAId={deckA?.id ?? null}
             deckBId={deckB?.id ?? null}
-            onPick={pickFromDeckPicker}
-            onClose={closeDeckPicker}
+            playing={session.status === "playing"}
+            scrollRef={scrollRef}
+            onLoadA={loadOnDeckA}
+            onLoadB={loadOnDeckB}
+            onDragTarget={setDragTarget}
           />
-        )}
-        <DeckBQuickLoad
-          deckAId={deckA?.id ?? null}
-          deckBId={deckB?.id ?? null}
-          onPick={selectDeckB}
-        />
+        </div>
       </div>
     </div>
   );
