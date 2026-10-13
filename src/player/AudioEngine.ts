@@ -900,6 +900,18 @@ export class AudioEngine {
     );
   }
 
+  /**
+   * Sets the active and standby deck tempos independently for the DJ pitch faders. Multipliers on
+   * each track's own speed, so 1.05 is +5%. Pitch moves with speed, as on a turntable.
+   */
+  async setDeckTempos(activeTempo: number, standbyTempo: number): Promise<void> {
+    if (!this.useRustAudio) return;
+    await rustAudio.setDeckTempos(
+      Math.max(0.5, Math.min(2, activeTempo)),
+      Math.max(0.5, Math.min(2, standbyTempo)),
+    );
+  }
+
   /** Whether a transition to `videoId` can skip loading entirely. */
   hasPreloaded(videoId: string): boolean {
     if (this.useRustAudio) return this.rustStandbyTrackId === videoId;

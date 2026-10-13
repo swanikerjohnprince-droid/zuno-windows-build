@@ -120,8 +120,30 @@ export async function stop(): Promise<void> {
   await invoke("native_audio_stop");
 }
 
+/** What one decode of a track yields for the DJ decks. */
+export interface TrackAnalysis {
+  /** `buckets` peaks across the whole track, each 0-255. */
+  peaks: Uint8Array;
+  /** Measured tempo, or null when the track is too short or has no pulse to measure. */
+  bpm: number | null;
+  /** 0-1. Rhythm scored 0.6-0.8 in testing, noise 0.06: below ~0.5, do not trust `bpm`. */
+  bpmConfidence: number;
+  /** Seconds from the start of the audio to the first beat of the grid. */
+  firstBeatSec: number;
+  /** Length of the audio actually decoded; the grid is laid out against this. */
+  durationSec: number;
+}
+
+interface TrackAnalysisPayload {
+  peaks: number[];
+  bpm: number | null;
+  bpmConfidence: number;
+  firstBeatSec: number;
+  durationSec: number;
+}
+
 /**
- * Full-track peaks for a waveform display, `buckets` of them, each 0-255.
+ * Waveform and tempo for a track, from a single decode: `buckets` peaks, plus BPM and beat grid.
  *
  * `source` is only for tracks whose bytes are on disk (`offline` / `file`). Pass `null` for a
  * streaming track: the Rust side then reads the buffer that track's own playback is already
@@ -129,13 +151,13 @@ export async function stop(): Promise<void> {
  * a deck yet it waits a few seconds for that to happen before giving up. A rejection means
  * "not available right now", not a fault; callers retry once the track is actually playing.
  */
-export function waveform(
+export function analyseTrack(
   trackId: string,
   source: RustAudioSource | null,
   buckets: number,
-): Promise<Uint8Array> {
-  return invoke<number[]>("native_audio_waveform", { trackId, source, buckets }).then(
-    (peaks) => Uint8Array.from(peaks),
+): Promise<TrackAnalysis> {
+  return invoke<TrackAnalysisPayload>("native_audio_waveform", { trackId, source, buckets }).then(
+    (payload) => ({ ...payload, peaks: Uint8Array.from(payload.peaks) }),
   );
 }
 
@@ -180,6 +202,11 @@ export function playStandby(trackId: string, volume: number): Promise<boolean> {
 
 export function setDeckVolumes(activeVolume: number, standbyVolume: number): Promise<void> {
   return invoke("native_audio_set_deck_volumes", { activeVolume, standbyVolume });
+}
+
+/** Each deck's tempo as a multiplier on the track's own speed (1 = unchanged). */
+export function setDeckTempos(activeTempo: number, standbyTempo: number): Promise<void> {
+  return invoke("native_audio_set_deck_tempos", { activeTempo, standbyTempo });
 }
 
 export function pauseStandby(trackId: string): Promise<boolean> {

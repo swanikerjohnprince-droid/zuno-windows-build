@@ -61,7 +61,8 @@ type PlayerControllerMethod =
   | "pauseDjActive"
   | "setDjDeckActive"
   | "resetAfterOutputChange"
-  | "getWaveform"
+  | "getTrackAnalysis"
+  | "setDjDeckTempos"
   | "togglePlayPause"
   | "addToQueue"
   | "playNext"
@@ -126,7 +127,8 @@ class ActivePlayerController implements PlayerControllerActions {
   pauseDjActive = () => tabManager.getActivePlayer().pauseDjActive();
   setDjDeckActive = (active: boolean) => tabManager.getActivePlayer().setDjDeckActive(active);
   resetAfterOutputChange = () => tabManager.getActivePlayer().resetAfterOutputChange();
-  getWaveform = (track: Track, buckets: number) => tabManager.getActivePlayer().getWaveform(track, buckets);
+  getTrackAnalysis = (track: Track, buckets: number) => tabManager.getActivePlayer().getTrackAnalysis(track, buckets);
+  setDjDeckTempos = (activeTempo: number, standbyTempo: number) => tabManager.getActivePlayer().setDjDeckTempos(activeTempo, standbyTempo);
   togglePlayPause = () => tabManager.getActivePlayer().togglePlayPause();
   addToQueue = (track: Parameters<PlayerController["addToQueue"]>[0]) =>
     tabManager.getActivePlayer().addToQueue(track);

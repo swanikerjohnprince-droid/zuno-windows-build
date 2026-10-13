@@ -50,6 +50,8 @@ mod process_memory;
 mod discord_rpc;
 mod equalizer;
 mod opus_source;
+mod position;
+mod tempo;
 mod lastfm;
 
 // Keep the legacy service name so existing sign-in credentials survive the product rename.
@@ -4352,6 +4354,25 @@ where
     (Box::new(shaped) as audio::BoxedSource, duration)
 }
 
+/// What one pass over a track's audio yields for the DJ decks: the waveform, and its tempo.
+///
+/// Both come from the same decode on purpose. A second pass would double the work, and for a
+/// streamed track would read the same in-memory buffer twice.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackAnalysis {
+    /// 0-255 peak per bucket across the whole track.
+    peaks: Vec<u8>,
+    /// Measured tempo, or `None` when the track is too short or has no pulse to measure.
+    bpm: Option<f64>,
+    /// 0-1: how far above chance the tempo fits. Low means "do not trust the number".
+    bpm_confidence: f32,
+    /// Seconds from the start of the audio to the first beat of the grid.
+    first_beat_sec: f64,
+    /// Length of the audio actually decoded, which is what the grid is laid out against.
+    duration_sec: f64,
+}
+
 /**
  * Full-track peaks for a waveform display: the whole song decoded once, `buckets` peaks across
  * its length. Works for every kind of source, and never downloads anything extra:
@@ -4364,7 +4385,7 @@ where
  *
  * No duration is taken from the caller or the container: Opus in WebM usually declares none and
  * provider metadata can be off by seconds, so the bucket boundaries come from how many frames
- * were actually decoded instead (see `accumulate_peaks`).
+ * were actually decoded instead (see `analyse_audio`).
  */
 #[tauri::command]
 async fn native_audio_waveform(
@@ -4372,7 +4393,7 @@ async fn native_audio_waveform(
     track_id: String,
     source: Option<NativeAudioSource>,
     buckets: usize,
-) -> Result<Vec<u8>, CommandError> {
+) -> Result<TrackAnalysis, CommandError> {
     enum Input {
         Disk(PathBuf, String),
         Stream(Arc<Mutex<MediaBuffer>>, String),
@@ -4407,9 +4428,7 @@ async fn native_audio_waveform(
         }
     };
 
-    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, CommandError> {
-        use rodio::Source as _;
-
+    tauri::async_runtime::spawn_blocking(move || -> Result<TrackAnalysis, CommandError> {
         let (reader, mime_type, buffer): (
             Box<dyn symphonia::core::io::MediaSource>,
             String,
@@ -4434,17 +4453,17 @@ async fn native_audio_waveform(
             ),
         };
 
-        let (peaks, frames) = if opus_source::is_opus(&mime_type) {
+        let analysis = if opus_source::is_opus(&mime_type) {
             let decoded = opus_source::OpusSource::new(reader, &mime_type)
                 .map_err(|error| cache_error(format!("waveform decode failed: {error}")))?;
-            accumulate_peaks(decoded, buckets)
+            analyse_audio(decoded, buckets)
         } else {
             let decoded = rodio::Decoder::new(reader)
                 .map_err(|error| cache_error(format!("waveform decode failed: {error}")))?;
-            accumulate_peaks(decoded, buckets)
+            analyse_audio(decoded, buckets)
         };
 
-        if frames == 0 {
+        if analysis.frames == 0 {
             return Err(cache_error("waveform: no audio decoded."));
         }
 
@@ -4473,11 +4492,18 @@ async fn native_audio_waveform(
         // Normalized against this track's own loudest peak rather than a fixed ceiling — a
         // quiet, well-mastered track would otherwise draw as a flat, unreadable line next to a
         // loud one, which tells a DJ nothing about the track's own internal dynamics.
-        let loudest = peaks.iter().cloned().fold(0f32, f32::max).max(f32::EPSILON);
-        Ok(peaks
-            .into_iter()
-            .map(|peak| ((peak / loudest).clamp(0.0, 1.0) * 255.0).round() as u8)
-            .collect())
+        let loudest = analysis.peaks.iter().cloned().fold(0f32, f32::max).max(f32::EPSILON);
+        Ok(TrackAnalysis {
+            peaks: analysis
+                .peaks
+                .into_iter()
+                .map(|peak| ((peak / loudest).clamp(0.0, 1.0) * 255.0).round() as u8)
+                .collect(),
+            bpm: analysis.tempo.map(|tempo| tempo.bpm),
+            bpm_confidence: analysis.tempo.map_or(0.0, |tempo| tempo.confidence),
+            first_beat_sec: analysis.tempo.map_or(0.0, |tempo| tempo.first_beat_sec),
+            duration_sec: analysis.frames as f64 / analysis.sample_rate.max(1) as f64,
+        })
     })
     .await
     .map_err(|error| cache_error(format!("waveform task failed: {error}")))?
@@ -4497,24 +4523,40 @@ async fn native_audio_waveform(
 ///   bucket from an *estimated* length, which meant wrong metadata left the tail of the
 ///   waveform empty or piled it all into the last bar. Chunks cost a few kB even for an hour
 ///   of audio, and remove the estimate (and the duration argument) altogether.
-fn accumulate_peaks<S>(mut source: S, buckets: usize) -> (Vec<f32>, u64)
+struct Analysis {
+    peaks: Vec<f32>,
+    frames: u64,
+    sample_rate: u32,
+    tempo: Option<tempo::Tempo>,
+}
+
+fn analyse_audio<S>(mut source: S, buckets: usize) -> Analysis
 where
     S: rodio::Source,
 {
     let channels = source.channels().get().max(1) as usize;
-    let frames_per_chunk = ((source.sample_rate().get() / 50).max(1)) as u64;
+    let sample_rate = source.sample_rate().get();
+    let frames_per_chunk = ((sample_rate / 50).max(1)) as u64;
+    let mut onsets = tempo::OnsetBuilder::new(sample_rate);
     let mut chunks: Vec<f32> = Vec::new();
     let mut chunk_peak = 0f32;
     let mut frame_index: u64 = 0;
 
     'frames: loop {
         let mut frame_peak = 0f32;
+        let mut frame_sum = 0f32;
         for _ in 0..channels {
             match source.next() {
-                Some(sample) => frame_peak = frame_peak.max(sample.abs()),
+                Some(sample) => {
+                    frame_peak = frame_peak.max(sample.abs());
+                    frame_sum += sample;
+                }
                 None => break 'frames,
             }
         }
+        // The waveform wants the loudest channel (averaging cancels out-of-phase content), but
+        // tempo wants the centred mix, where the kick and snare are: see `tempo.rs`.
+        onsets.push(frame_sum / channels as f32);
         chunk_peak = chunk_peak.max(frame_peak);
         frame_index += 1;
         if frame_index % frames_per_chunk == 0 {
@@ -4526,7 +4568,7 @@ where
         chunks.push(chunk_peak);
     }
     if chunks.is_empty() {
-        return (vec![0f32; buckets], 0);
+        return Analysis { peaks: vec![0f32; buckets], frames: 0, sample_rate, tempo: None };
     }
 
     let total = chunks.len();
@@ -4537,7 +4579,7 @@ where
             chunks[from..to].iter().cloned().fold(0f32, f32::max)
         })
         .collect();
-    (peaks, frame_index)
+    Analysis { peaks, frames: frame_index, sample_rate, tempo: onsets.finish() }
 }
 
 /// The ten band gains and the preamp, in dB. Applies to whatever is playing, immediately.
@@ -4658,6 +4700,21 @@ fn native_audio_seek_standby(
     position_sec: f64,
 ) -> Result<bool, CommandError> {
     audio::request(&state, |reply| audio::Command::SeekStandby { track_id, seconds: position_sec, reply })
+        .map_err(cache_error)
+}
+
+/// Sets each deck's tempo as a multiplier on the track's own speed (1.0 = unchanged).
+#[tauri::command]
+fn native_audio_set_deck_tempos(
+    state: tauri::State<'_, audio::NativeAudio>,
+    active_tempo: f32,
+    standby_tempo: f32,
+) -> Result<(), CommandError> {
+    state
+        .send(audio::Command::SetDeckTempos {
+            active_tempo,
+            standby_tempo,
+        })
         .map_err(cache_error)
 }
 
@@ -5680,6 +5737,7 @@ pub fn run() {
             native_audio_pause_standby,
             native_audio_seek_standby,
             native_audio_set_deck_volumes,
+            native_audio_set_deck_tempos,
             native_audio_has_standby,
             native_audio_drop_standby,
             native_audio_drop_active,

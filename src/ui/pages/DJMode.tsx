@@ -6,6 +6,26 @@ import type { PlayerSession } from "../../player/PlayerController";
 import { TrackArtwork } from "../components/TrackArtwork";
 import { cn } from "@/lib/utils";
 import { OUTPUT_RESET_EVENT } from "../settings/audioOutputDevice";
+import type { TrackAnalysis } from "../../player/rustAudio";
+import {
+  DEFAULT_TEMPO_RANGE,
+  RELIABLE_CONFIDENCE,
+  TEMPO_RANGES,
+  beatTimes,
+  clampPercent,
+  doubleBpm,
+  formatBpm,
+  formatPercent,
+  halveBpm,
+  heardBpm,
+  parseBpmOverrides,
+  registerTap,
+  resolveBpm,
+  serializeBpmOverrides,
+  syncPercent,
+  tempoRatio,
+  type TempoRange,
+} from "./djTempo";
 import { Marquee } from "@/components/motion/marquee";
 import { PlayIcon, PauseIcon, MusicNoteIcon, ArrowRightIcon } from "@/ui/icons";
 
@@ -112,40 +132,61 @@ function formatTime(seconds: number) {
 
 /** Peaks requested per track: enough for a crisp full-width overview at 2x pixel density. */
 const WAVEFORM_BUCKETS = 1024;
+const BPM_OVERRIDES_KEY = "zuno.dj.bpmOverrides";
 const WAVEFORM_HEIGHT = 80;
 
 type WaveformStatus = "empty" | "loading" | "ready" | "unavailable";
 
+interface DeckAnalysis {
+  id: string | null;
+  status: WaveformStatus;
+  peaks: Uint8Array | null;
+  bpm: number | null;
+  bpmConfidence: number;
+  firstBeatSec: number;
+  durationSec: number;
+}
+
+const NOTHING_MEASURED = { peaks: null, bpm: null, bpmConfidence: 0, firstBeatSec: 0, durationSec: 0 };
+
 /**
- * Real peaks for a deck's track, decoded once in Rust and cached by the controller. Streaming
- * tracks are analysed from the buffer their own playback is filling, so they only have a
- * waveform once they are actually loaded onto a deck — `retryKey` is how a deck says "that has
- * changed, ask again" (Deck A flips it when playback starts; Deck B when it is played). A track
- * with no peaks to give is shown as having none, never as a generated stand-in shape, because a
- * made-up waveform is worse than none: a DJ reads breaks and drops off it.
+ * Waveform and tempo for a deck's track, from the one decode Rust does of it, cached by the
+ * controller. Streaming tracks are analysed from the buffer their own playback is filling, so they
+ * only have an analysis once they are actually loaded onto a deck — `retryKey` is how a deck says
+ * "that has changed, ask again" (Deck A flips it when playback starts; Deck B when it is played).
+ * A track with nothing to give is shown as having none, never as a generated stand-in: a made-up
+ * waveform or BPM is worse than none, because a DJ beat-matches off them.
  */
-function useWaveform(playerController: PlayerControllerActions, track: Track | null, retryKey: boolean) {
-  const [result, setResult] = useState<{ id: string | null; peaks: Uint8Array | null; status: WaveformStatus }>({
-    id: null,
-    peaks: null,
-    status: "empty",
-  });
+function useTrackAnalysis(playerController: PlayerControllerActions, track: Track | null, retryKey: boolean): DeckAnalysis {
+  const [result, setResult] = useState<DeckAnalysis>({ id: null, status: "empty", ...NOTHING_MEASURED });
   const resultRef = useRef(result);
   resultRef.current = result;
   const trackId = track?.id ?? null;
 
   useEffect(() => {
     if (!track) {
-      setResult({ id: null, peaks: null, status: "empty" });
+      setResult({ id: null, status: "empty", ...NOTHING_MEASURED });
       return;
     }
-    // Already drawn for this track: a retry signal must not blank a working waveform.
+    // Already measured for this track: a retry signal must not blank a working waveform.
     if (resultRef.current.id === track.id && resultRef.current.status === "ready") return;
     let cancelled = false;
-    setResult({ id: track.id, peaks: null, status: "loading" });
-    void playerController.getWaveform(track, WAVEFORM_BUCKETS).then((peaks) => {
+    setResult({ id: track.id, status: "loading", ...NOTHING_MEASURED });
+    void playerController.getTrackAnalysis(track, WAVEFORM_BUCKETS).then((analysis: TrackAnalysis | null) => {
       if (cancelled) return;
-      setResult({ id: track.id, peaks, status: peaks ? "ready" : "unavailable" });
+      setResult(
+        analysis
+          ? {
+              id: track.id,
+              status: "ready",
+              peaks: analysis.peaks,
+              bpm: analysis.bpm,
+              bpmConfidence: analysis.bpmConfidence,
+              firstBeatSec: analysis.firstBeatSec,
+              durationSec: analysis.durationSec,
+            }
+          : { id: track.id, status: "unavailable", ...NOTHING_MEASURED },
+      );
     });
     return () => {
       cancelled = true;
@@ -155,7 +196,9 @@ function useWaveform(playerController: PlayerControllerActions, track: Track | n
   }, [trackId, retryKey, playerController]);
 
   // A result for the previous track must never draw under the new one for even one frame.
-  return result.id === trackId ? result : { id: trackId, peaks: null, status: (trackId ? "loading" : "empty") as WaveformStatus };
+  return result.id === trackId
+    ? result
+    : { id: trackId, status: trackId ? "loading" : "empty", ...NOTHING_MEASURED };
 }
 
 /**
@@ -170,12 +213,15 @@ function Waveform({
   status,
   fraction,
   disabled,
+  grid,
   onSeekFraction,
 }: {
   peaks: Uint8Array | null;
   status: WaveformStatus;
   fraction: number;
   disabled: boolean;
+  /** Beat grid in track time, or null when there is no tempo to draw. */
+  grid: { firstBeatSec: number; bpm: number; durationSec: number } | null;
   onSeekFraction: (fraction: number) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -230,7 +276,30 @@ function Waveform({
 
   // `getComputedStyle` can force a synchronous style recalculation, and it used to run on every
   // redraw. The colours only change with the theme, which is one attribute on <html>.
-  const colorsRef = useRef<{ key: string; played: string; unplayed: string } | null>(null);
+  const colorsRef = useRef<{ key: string; played: string; unplayed: string; tick: string } | null>(null);
+
+  /*
+   * Beat ticks along the top edge: short on every beat, tall on every fourth. Where beats would be
+   * closer than a few pixels they are drawn for bars only, and where even bars are that close
+   * nothing is drawn — a fence of lines tells a DJ less than a clean waveform does. Like the bar
+   * heights, worked out once here rather than on every redraw of the playhead.
+   */
+  const ticks = useMemo(() => {
+    if (!grid || !columns || grid.durationSec <= 0) return null;
+    const beatPx = ((60 / grid.bpm) / grid.durationSec) * columns.pixelWidth;
+    const minGap = 3 * ratio;
+    const stride = beatPx >= minGap ? 1 : 4;
+    if (beatPx * stride < minGap) return null;
+    const beats = beatTimes(grid.firstBeatSec, grid.bpm, grid.durationSec);
+    const xs: number[] = [];
+    const tall: boolean[] = [];
+    beats.forEach((time, index) => {
+      if (index % stride !== 0) return;
+      xs.push((time / grid.durationSec) * columns.pixelWidth);
+      tall.push(index % 4 === 0);
+    });
+    return { xs, tall };
+  }, [grid?.firstBeatSec, grid?.bpm, grid?.durationSec, columns, ratio]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -250,9 +319,10 @@ function Waveform({
         key: themeKey,
         played: styles.getPropertyValue("--color-primary").trim() || "#00cccc",
         unplayed: styles.getPropertyValue("--color-muted-foreground").trim() || "#888",
+        tick: styles.getPropertyValue("--color-foreground").trim() || "#fff",
       };
     }
-    const { played, unplayed } = colorsRef.current;
+    const { played, unplayed, tick } = colorsRef.current;
 
     // Columns are laid out left to right, so "played" is simply the first `split` of them.
     const playedEdge = clamped * pixelWidth;
@@ -274,11 +344,22 @@ function Waveform({
       ctx.rect(column * step, tops[column], barWidth, heights[column]);
     }
     ctx.fill();
+
+    if (ticks) {
+      const tickWidth = Math.max(1, Math.round(ratio * 0.75));
+      ctx.globalAlpha = 0.7;
+      ctx.fillStyle = tick;
+      ctx.beginPath();
+      for (let i = 0; i < ticks.xs.length; i += 1) {
+        ctx.rect(ticks.xs[i], 0, tickWidth, (ticks.tall[i] ? 9 : 5) * ratio);
+      }
+      ctx.fill();
+    }
     ctx.globalAlpha = 1;
     // playedPx (not the raw fraction) is the dependency: redrawing on every tick that
     // doesn't move the lit edge by a whole pixel would be pure waste.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [columns, playedPx]);
+  }, [columns, playedPx, ticks]);
 
   const seekFromEvent = (event: React.PointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -344,6 +425,126 @@ function Waveform({
   );
 }
 
+/** Everything a deck's tempo panel shows, worked out by `DJMode` so the panel is just a view. */
+interface DeckTempoView {
+  /** The track's own BPM: the one set by hand if there is one, otherwise the measured one. */
+  bpm: number | null;
+  confidence: number;
+  /** Still being measured. */
+  analysing: boolean;
+  overridden: boolean;
+  /** Fader position, as a percent. */
+  percent: number;
+  range: TempoRange;
+  /** Settings' playback speed, which multiplies with the fader. */
+  globalRate: number;
+  canSync: boolean;
+  notice: string | null;
+}
+
+interface DeckTempoActions {
+  onPercent: (percent: number) => void;
+  onRange: (range: TempoRange) => void;
+  onSync: () => void;
+  onTap: () => void;
+  onHalve: () => void;
+  onDouble: () => void;
+  onClearBpm: () => void;
+}
+
+const TEMPO_BUTTON =
+  "h-7 rounded-lg bg-muted px-2 text-[10px] font-bold transition-colors hover:bg-primary hover:text-primary-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-muted disabled:hover:text-inherit";
+
+/**
+ * BPM readout and pitch fader for one deck.
+ *
+ * The big number is what is *heard*: the track's own BPM scaled by the fader and by Settings'
+ * playback speed, because that is what has to match the other deck. The track's own BPM sits
+ * underneath it, so it is always clear what the fader is moving away from.
+ */
+function TempoPanel({ side, view, actions }: { side: "A" | "B"; view: DeckTempoView; actions: DeckTempoActions }) {
+  const heard = view.bpm === null ? null : heardBpm(view.bpm, view.percent, view.globalRate);
+  const uncertain = view.bpm !== null && !view.overridden && view.confidence < RELIABLE_CONFIDENCE;
+  return (
+    <div className="mt-3 rounded-xl bg-background/70 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-bold tabular-nums">{view.analysing && view.bpm === null ? "…" : formatBpm(heard)}</span>
+            <span className="text-[10px] font-bold tracking-widest text-muted-foreground">BPM</span>
+            {uncertain && (
+              <span
+                title="The measurement was not confident — check it by ear, or tap the tempo yourself."
+                className="rounded-md bg-primary/15 px-1.5 py-0.5 text-[9px] font-bold text-primary"
+              >
+                CHECK
+              </span>
+            )}
+            {view.overridden && (
+              <span className="rounded-md bg-muted px-1.5 py-0.5 text-[9px] font-bold text-muted-foreground">SET</span>
+            )}
+          </div>
+          <div className="text-[10px] tabular-nums text-muted-foreground">
+            track {formatBpm(view.bpm)} · fader {formatPercent(view.percent)}
+          </div>
+        </div>
+        <div className="flex shrink-0 gap-1">
+          <button type="button" onClick={actions.onTap} title="Tap along with the beat to set the BPM" className={TEMPO_BUTTON}>TAP</button>
+          <button type="button" onClick={actions.onHalve} disabled={view.bpm === null} title="Measured an octave too high: halve it" className={TEMPO_BUTTON}>½</button>
+          <button type="button" onClick={actions.onDouble} disabled={view.bpm === null} title="Measured an octave too low: double it" className={TEMPO_BUTTON}>×2</button>
+          {view.overridden && (
+            <button type="button" onClick={actions.onClearBpm} title="Go back to the measured BPM" className={TEMPO_BUTTON}>↺</button>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-center gap-2">
+        <span className="text-[10px] font-bold tracking-widest text-muted-foreground">TEMPO</span>
+        <input
+          aria-label={`Deck ${side} tempo`}
+          type="range"
+          min={-view.range}
+          max={view.range}
+          step={0.1}
+          value={view.percent}
+          onChange={(event) => actions.onPercent(Number(event.target.value))}
+          onDoubleClick={() => actions.onPercent(0)}
+          className="min-w-0 flex-1 accent-[var(--color-primary)]"
+        />
+        <button
+          type="button"
+          onClick={actions.onSync}
+          disabled={!view.canSync}
+          title={view.canSync ? "Match this deck's tempo to the other deck's" : "Needs a BPM on both decks"}
+          className={TEMPO_BUTTON}
+        >
+          SYNC
+        </button>
+        <button type="button" onClick={() => actions.onPercent(0)} title="Back to the track's own tempo" className={TEMPO_BUTTON}>0</button>
+      </div>
+
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1">
+          {TEMPO_RANGES.map((range) => (
+            <button
+              key={range}
+              type="button"
+              onClick={() => actions.onRange(range)}
+              className={cn(
+                "h-6 rounded-md px-2 text-[9px] font-bold transition-colors",
+                view.range === range ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:bg-muted/70",
+              )}
+            >
+              ±{range}%
+            </button>
+          ))}
+        </div>
+        {view.notice && <span className="min-w-0 truncate text-[10px] text-muted-foreground">{view.notice}</span>}
+      </div>
+    </div>
+  );
+}
+
 function Deck({
   side,
   track,
@@ -361,6 +562,9 @@ function Deck({
   onTrim,
   hotCues,
   dragState,
+  grid,
+  tempo,
+  tempoActions,
 }: {
   side: "A" | "B";
   track: Track | null;
@@ -380,6 +584,9 @@ function Deck({
   hotCues: (number | null)[];
   /** A queue track is being dragged: null = no drag, otherwise which deck (if any) it is over. */
   dragState: DragTarget;
+  grid: { firstBeatSec: number; bpm: number; durationSec: number } | null;
+  tempo: DeckTempoView;
+  tempoActions: DeckTempoActions;
 }) {
   const dragging = dragState !== null;
   const isDropTarget = dragState === side;
@@ -449,6 +656,7 @@ function Deck({
           status={waveformStatus}
           fraction={duration ? position / duration : 0}
           disabled={locked || !duration}
+          grid={grid}
           onSeekFraction={(fraction) => onSeek(fraction * duration)}
         />
         <input
@@ -480,6 +688,8 @@ function Deck({
           ))}
         </div>
       </div>
+
+      <TempoPanel side={side} view={tempo} actions={tempoActions} />
     </section>
   );
 }
@@ -810,6 +1020,33 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   const [dragTarget, setDragTarget] = useState<DragTarget>(null);
   // The scrolling page body, so a drag near its top or bottom edge can scroll it.
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // --- tempo ---------------------------------------------------------------------------------
+  const [tempoRange, setTempoRange] = useState<TempoRange>(DEFAULT_TEMPO_RANGE);
+  // Fader position per *track*, not per deck: a mix promotes Deck B to Deck A, and the track
+  // keeps the tempo it was beat-matched at without anything having to be carried across.
+  const [tempoByTrack, setTempoByTrack] = useState<Record<string, number>>({});
+  // BPMs set by hand (tap, half, double), remembered across sessions. The measurement is always
+  // re-done and never overwritten by these: clearing one goes back to what was measured.
+  const [bpmOverrides, setBpmOverrides] = useState<Record<string, number>>(() => {
+    try {
+      return parseBpmOverrides(window.localStorage.getItem(BPM_OVERRIDES_KEY));
+    } catch {
+      return {};
+    }
+  });
+  const [tempoNotice, setTempoNotice] = useState<{ A: string | null; B: string | null }>({ A: null, B: null });
+  const tapsRef = useRef<{ A: number[]; B: number[] }>({ A: [], B: [] });
+  const noticeTimers = useRef<{ A?: number; B?: number }>({});
+  /** What the engine should have been told, readable from callbacks that outlive a render. */
+  const temposRef = useRef<[number, number]>([1, 1]);
+  /**
+   * How fast Deck B's playhead advances, in track seconds per wall second. Deck B has no position
+   * events from Rust, only this clock, so it has to run at the deck's real speed or it drifts away
+   * from the audio the moment the tempo is not 1.
+   */
+  const deckBRateRef = useRef(1);
+  const startedAtFor = (position: number) => Date.now() - (position * 1000) / deckBRateRef.current;
   const [trimA, setTrimA] = useState(1);
   const [trimB, setTrimB] = useState(1);
   const [transitionSec, setTransitionSec] = useState(DEFAULT_TRANSITION_SEC);
@@ -835,6 +1072,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
         if (!ready) return;
         setDeckBDuration(controller.getCuedDuration(current));
         void controller.setDjDeckVolumes(volumes[0], volumes[1]);
+        void controller.setDjDeckTempos(temposRef.current[0], temposRef.current[1]);
       });
     };
     window.addEventListener(OUTPUT_RESET_EVENT, onReset);
@@ -873,6 +1111,8 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
         void exitingController.pauseCuedTrack(exitingDeckB);
       }
       void exitingController.setDjDeckVolumes(1, 0);
+      // The faders are a DJ Mode thing: leaving must not leave the player running fast or slow.
+      void exitingController.setDjDeckTempos(1, 1);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playerController]);
@@ -885,8 +1125,195 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   }, [playerController]);
 
   const deckA = session.currentTrack;
-  const waveformA = useWaveform(playerController, deckA, session.status === "playing");
-  const waveformB = useWaveform(playerController, deckB, deckBPlaying);
+  const waveformA = useTrackAnalysis(playerController, deckA, session.status === "playing");
+  const waveformB = useTrackAnalysis(playerController, deckB, deckBPlaying);
+
+  // --- tempo: what is heard, per deck ----------------------------------------------------------
+  const globalRate = playerController.getPlaybackRate();
+  const overrideA = deckA ? bpmOverrides[deckA.id] : undefined;
+  const overrideB = deckB ? bpmOverrides[deckB.id] : undefined;
+  const bpmA = resolveBpm(waveformA.bpm, overrideA);
+  const bpmB = resolveBpm(waveformB.bpm, overrideB);
+  const pctA = deckA ? (tempoByTrack[deckA.id] ?? 0) : 0;
+  const pctB = deckB ? (tempoByTrack[deckB.id] ?? 0) : 0;
+  const heardA = bpmA === null ? null : heardBpm(bpmA, pctA, globalRate);
+  const heardB = bpmB === null ? null : heardBpm(bpmB, pctB, globalRate);
+  const deckBRate = globalRate * tempoRatio(pctB);
+  temposRef.current = [tempoRatio(pctA), tempoRatio(pctB)];
+
+  // The engine resets a deck's tempo when a track loads onto it, and the fader here is remembered
+  // per track, so a track that is no longer on a deck must not keep a stale position: loading it
+  // again would show the fader somewhere the engine is not.
+  useEffect(() => {
+    setTempoByTrack((current) => {
+      let changed = false;
+      const next: Record<string, number> = {};
+      for (const [id, percent] of Object.entries(current)) {
+        if (id === deckA?.id || id === deckB?.id) next[id] = percent;
+        else changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, [deckA?.id, deckB?.id]);
+
+  // Tell the engine. Also when a deck starts playing: that is when a track that was loaded since
+  // the last send has just come up at its own speed.
+  useEffect(() => {
+    void playerController.setDjDeckTempos(tempoRatio(pctA), tempoRatio(pctB));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pctA, pctB, deckA?.id, deckB?.id, session.status === "playing", deckBPlaying, playerController]);
+
+  // A tempo change must not move Deck B's playhead: what has played so far was played at the old
+  // rate, so the clock's start is shifted to make the same position come out at the new one.
+  useEffect(() => {
+    const previous = deckBRateRef.current;
+    if (previous === deckBRate) return;
+    deckBRateRef.current = deckBRate;
+    setDeckBStartedAt((started) =>
+      started === null ? null : Date.now() - ((Date.now() - started) * previous) / deckBRate,
+    );
+  }, [deckBRate]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(BPM_OVERRIDES_KEY, serializeBpmOverrides(bpmOverrides));
+    } catch {
+      // Private mode or a full quota: the overrides just do not outlive the session.
+    }
+  }, [bpmOverrides]);
+
+  useEffect(() => () => {
+    window.clearTimeout(noticeTimers.current.A);
+    window.clearTimeout(noticeTimers.current.B);
+  }, []);
+
+  const flashNotice = (side: "A" | "B", text: string) => {
+    setTempoNotice((current) => ({ ...current, [side]: text }));
+    window.clearTimeout(noticeTimers.current[side]);
+    noticeTimers.current[side] = window.setTimeout(
+      () => setTempoNotice((current) => ({ ...current, [side]: null })),
+      3500,
+    );
+  };
+
+  const setTempoPercent = (side: "A" | "B", percent: number) => {
+    const track = side === "A" ? deckA : deckB;
+    if (!track) return;
+    const clamped = clampPercent(percent, tempoRange);
+    setTempoByTrack((current) => ({ ...current, [track.id]: clamped }));
+  };
+
+  const changeTempoRange = (range: TempoRange) => {
+    setTempoRange(range);
+    setTempoByTrack((current) =>
+      Object.fromEntries(Object.entries(current).map(([id, percent]) => [id, clampPercent(percent, range)])),
+    );
+  };
+
+  const setBpmOverride = (trackId: string, bpm: number | null) => {
+    setBpmOverrides((current) => {
+      // Re-inserted at the end so insertion order stays recency, which is what the saved list keeps.
+      const { [trackId]: _removed, ...rest } = current;
+      return bpm === null ? rest : { ...rest, [trackId]: Math.round(bpm * 100) / 100 };
+    });
+  };
+
+  const syncDeck = (side: "A" | "B") => {
+    const track = side === "A" ? deckA : deckB;
+    const own = side === "A" ? bpmA : bpmB;
+    const target = side === "A" ? heardB : heardA;
+    const other = side === "A" ? "B" : "A";
+    if (!track || own === null || target === null) return;
+    let range: TempoRange = tempoRange;
+    let result = syncPercent(own, target, range, globalRate);
+    if (result && !result.inRange) {
+      // Widen to the narrowest range that reaches it, rather than stopping short and leaving the
+      // decks audibly apart. Never narrows: that is for the person to do.
+      const widest = TEMPO_RANGES[TEMPO_RANGES.length - 1];
+      const wide = syncPercent(own, target, widest, globalRate);
+      if (wide?.inRange) {
+        range = TEMPO_RANGES.find((candidate) => candidate >= Math.abs(wide.percent)) ?? widest;
+        setTempoRange(range);
+        result = syncPercent(own, target, range, globalRate);
+      }
+    }
+    if (!result) return;
+    const percent = result.percent;
+    setTempoByTrack((current) => ({ ...current, [track.id]: percent }));
+    flashNotice(
+      side,
+      !result.inRange
+        ? `Out of range — nearest is ${formatPercent(percent)}`
+        : result.multiple === 1
+          ? `Synced to Deck ${other}`
+          : `Synced to Deck ${other} at ${result.multiple === 2 ? "double" : "half"} time`,
+    );
+  };
+
+  const tapDeck = (side: "A" | "B") => {
+    const track = side === "A" ? deckA : deckB;
+    if (!track) return;
+    const { taps, bpm } = registerTap(tapsRef.current[side], performance.now());
+    tapsRef.current[side] = taps;
+    if (bpm === null) {
+      if (taps.length === 1) flashNotice(side, "Keep tapping along with the beat…");
+      return;
+    }
+    // Taps follow what is heard, which includes the fader; the track's own BPM is what is stored.
+    const percent = side === "A" ? pctA : pctB;
+    setBpmOverride(track.id, bpm / (globalRate * tempoRatio(percent)));
+  };
+
+  const tempoView = (side: "A" | "B"): DeckTempoView => {
+    const isA = side === "A";
+    const analysis = isA ? waveformA : waveformB;
+    const own = isA ? bpmA : bpmB;
+    const otherHeard = isA ? heardB : heardA;
+    return {
+      bpm: own,
+      confidence: analysis.bpmConfidence,
+      analysing: analysis.status === "loading",
+      overridden: (isA ? overrideA : overrideB) !== undefined,
+      percent: isA ? pctA : pctB,
+      range: tempoRange,
+      globalRate,
+      canSync: own !== null && otherHeard !== null,
+      notice: tempoNotice[side],
+    };
+  };
+
+  const tempoActions = (side: "A" | "B"): DeckTempoActions => {
+    const track = side === "A" ? deckA : deckB;
+    const own = side === "A" ? bpmA : bpmB;
+    return {
+      onPercent: (percent) => setTempoPercent(side, percent),
+      onRange: changeTempoRange,
+      onSync: () => syncDeck(side),
+      onTap: () => tapDeck(side),
+      onHalve: () => {
+        if (track && own !== null) setBpmOverride(track.id, halveBpm(own));
+      },
+      onDouble: () => {
+        if (track && own !== null) setBpmOverride(track.id, doubleBpm(own));
+      },
+      onClearBpm: () => {
+        if (track) setBpmOverride(track.id, null);
+      },
+    };
+  };
+
+  /**
+   * The beat grid is only drawn while the BPM in use is the measured one or an exact half or
+   * double of it: the first beat the grid is anchored to comes from the measurement, and a tapped
+   * BPM that is some other number has no known relationship to it, so lines drawn from it would
+   * look authoritative and sit in the wrong places.
+   */
+  const gridFor = (analysis: DeckAnalysis, inUse: number | null) => {
+    if (analysis.bpm === null || inUse === null || analysis.durationSec <= 0) return null;
+    const ratio = inUse / analysis.bpm;
+    if (![0.5, 1, 2].some((multiple) => Math.abs(ratio - multiple) < 0.005 * multiple)) return null;
+    return { firstBeatSec: analysis.firstBeatSec, bpm: inUse, durationSec: analysis.durationSec };
+  };
   const durationA = deckA?.durationSec ?? playerController.getDuration();
   const durationB = deckBDuration || deckB?.durationSec || 0;
 
@@ -924,7 +1351,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   useEffect(() => {
     if (!deckBPlaying || !deckBStartedAt || !durationB) return;
     const timer = window.setInterval(() => {
-      const elapsed = (Date.now() - deckBStartedAt) / 1000;
+      const elapsed = ((Date.now() - deckBStartedAt) / 1000) * deckBRateRef.current;
       setDeckBPosition(Math.min(durationB, elapsed));
       if (elapsed >= durationB) {
         setDeckBPlaying(false);
@@ -954,6 +1381,8 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     void playerController.cueTrack(deckB).then((ready) => {
       if (!ready) return;
       setDeckBDuration(playerController.getCuedDuration(deckB));
+      // A freshly loaded deck starts at its own speed; tell it where the fader is.
+      void playerController.setDjDeckTempos(temposRef.current[0], temposRef.current[1]);
     });
   }, [deckB, playerController]);
 
@@ -983,7 +1412,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
       void playerController.playCuedTrack(deckB, volumeB).then((started) => {
         if (!started) return;
         setDeckBPlaying(true);
-        setDeckBStartedAt(Date.now() - deckBPosition * 1000);
+        setDeckBStartedAt(startedAtFor(deckBPosition));
       }).finally(() => {
         deckBStartingRef.current = false;
       });
@@ -1021,6 +1450,25 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     }
   };
 
+  /*
+   * The crossfader's levels live here, in `deckMixVolumes`; the engine only knows them because
+   * they were sent. A track that starts on Deck A by any other route — the browse pane in Split
+   * Mode, the queue list, the media keys, or playback moving on by itself — is loaded at the
+   * engine's own full volume, ignoring the crossfader, so it blares over Deck B while the
+   * crossfader says otherwise. Then the first pause/play re-sends the real levels and the deck
+   * suddenly goes quiet until the crossfader is touched, which reads as Deck A breaking.
+   * Re-sending whenever a track starts keeps the engine and the crossfader saying the same
+   * thing. Not during a mix: the native fade owns the levels until it finishes.
+   */
+  useEffect(() => {
+    if (isMixing || session.status !== "playing") return;
+    void playerController.setDjDeckVolumes(deckMixVolumes[0], deckMixVolumes[1]);
+    // Keyed on the track and on playback starting, not on deckMixVolumes: the crossfader and
+    // trim handlers already send their own levels, and re-sending on every drag step would
+    // just double each one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deckA?.id, session.status === "playing"]);
+
   const playB = async () => {
     if (!deckB || isMixing) return;
     if (deckBPlaying) {
@@ -1036,7 +1484,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     const started = await playerController.playCuedTrack(deckB, volumeB);
     if (started) {
       setDeckBPlaying(true);
-      setDeckBStartedAt(Date.now() - deckBPosition * 1000);
+      setDeckBStartedAt(startedAtFor(deckBPosition));
     }
   };
 
@@ -1150,6 +1598,9 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             onTrim={(value) => applyTrim("A", value)}
             hotCues={hotCuesA}
             dragState={dragTarget}
+            grid={gridFor(waveformA, bpmA)}
+            tempo={tempoView("A")}
+            tempoActions={tempoActions("A")}
           />
           <Deck
             side="B"
@@ -1167,13 +1618,13 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
               const time = hotCuesB[0] ?? 0;
               setDeckBPosition(time);
               void playerController.seekCuedTrack(deckB, time);
-              if (deckBPlaying) setDeckBStartedAt(Date.now() - time * 1000);
+              if (deckBPlaying) setDeckBStartedAt(startedAtFor(time));
             }}
             onSeek={(value) => {
               setDeckBPosition(value);
               if (deckB) {
                 void playerController.seekCuedTrack(deckB, value);
-                if (deckBPlaying) setDeckBStartedAt(Date.now() - value * 1000);
+                if (deckBPlaying) setDeckBStartedAt(startedAtFor(value));
                 const [volumeA, volumeB] = deckVolumes(crossfader / 100);
                 setDeckMixVolumes([volumeA, volumeB]);
                 void playerController.setDjDeckVolumes(volumeA, volumeB);
@@ -1183,6 +1634,9 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             onTrim={(value) => applyTrim("B", value)}
             hotCues={hotCuesB}
             dragState={dragTarget}
+            grid={gridFor(waveformB, bpmB)}
+            tempo={tempoView("B")}
+            tempoActions={tempoActions("B")}
           />
         </div>
 

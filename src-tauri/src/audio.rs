@@ -19,6 +19,7 @@
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
+use crate::position::{Counted, PositionCounter};
 use std::time::{Duration, Instant};
 
 use rodio::stream::{DeviceSinkBuilder, MixerDeviceSink};
@@ -41,6 +42,15 @@ const FADE_STEP: Duration = Duration::from_millis(20);
 
 /// How often the OS default output is compared against the one the stream was opened on. Often
 /// enough that plugging in headphones feels immediate, rare enough to cost nothing.
+/// The slowest and fastest a deck is allowed to play, whatever the rate and tempo multiply to.
+const MIN_SPEED: f32 = 0.25;
+const MAX_SPEED: f32 = 4.0;
+
+/// How far a deck's tempo fader may move the speed either way. Wider than any real DJ fader (a
+/// few hundred percent is a range, not a pitch bend) so the UI, not the engine, owns the limit.
+const MIN_TEMPO: f32 = 0.5;
+const MAX_TEMPO: f32 = 2.0;
+
 const DEFAULT_DEVICE_POLL: Duration = Duration::from_secs(1);
 
 /// How long a decoder read waits for bytes that have not landed yet before giving up.
@@ -205,6 +215,13 @@ struct Deck {
     track_id: Option<String>,
     duration_sec: f64,
     health: Option<DeckHealth>,
+    /// This deck's tempo fader, as a multiplier on the global `rate`: 1.0 plays the track at its
+    /// own speed. Lives on the deck, not on a "Deck A" / "Deck B" label, so it stays with the
+    /// track through a transition — the incoming deck keeps the tempo it was beat-matched at.
+    tempo: f32,
+    /// Exact position in the recording, counted where the decoder hands samples on. See
+    /// `position.rs` for why rodio's own `get_pos` cannot be used once speed is not 1.
+    position: Option<Arc<PositionCounter>>,
 }
 
 impl Deck {
@@ -213,6 +230,16 @@ impl Deck {
         self.track_id = None;
         self.duration_sec = 0.0;
         self.health = None;
+        self.tempo = 1.0;
+        self.position = None;
+    }
+
+    /// Seconds into the track, whatever the playback speed.
+    fn position_sec(&self) -> f64 {
+        match &self.position {
+            Some(position) => position.seconds(),
+            None => self.sink.get_pos().as_secs_f64(),
+        }
     }
 
     /// False only when a probe exists and says the source is broken. No probe means healthy.
@@ -280,6 +307,13 @@ pub(crate) enum Command {
     SetDeckVolumes {
         active_volume: f32,
         standby_volume: f32,
+    },
+    /// Sets the tempo of the active and standby decks independently, each a multiplier on the
+    /// track's own speed (1.0 = unchanged). This is the DJ pitch fader: it changes pitch along
+    /// with speed, like a turntable, because rodio resamples rather than time-stretching.
+    SetDeckTempos {
+        active_tempo: f32,
+        standby_tempo: f32,
     },
     /// Whether `track_id` is sitting decoded on the standby deck.
     HasStandby {
@@ -699,12 +733,16 @@ fn run(
             track_id: None,
             duration_sec: 0.0,
             health: None,
+            tempo: 1.0,
+            position: None,
         },
         Deck {
             sink: Player::connect_new(stream.mixer()),
             track_id: None,
             duration_sec: 0.0,
             health: None,
+            tempo: 1.0,
+            position: None,
         },
     ];
     for deck in &decks {
@@ -823,10 +861,15 @@ impl Engine {
 
                 let deck = &mut self.decks[index];
                 deck.sink.stop();
-                deck.sink.append(source);
+                // Counted before rodio's speed stage, so what it reports is track time.
+                let (counted, position) = Counted::new(source);
+                deck.sink.append(counted);
+                deck.position = Some(position);
                 deck.sink.pause();
                 deck.sink.set_volume(volume);
-                deck.sink.set_speed(rate);
+                // A freshly loaded track starts at its own speed; the frontend re-sends the fader.
+                deck.tempo = 1.0;
+                deck.sink.set_speed(rate.clamp(MIN_SPEED, MAX_SPEED));
                 deck.track_id = Some(track_id);
                 deck.duration_sec = duration;
                 deck.health = health;
@@ -867,7 +910,11 @@ impl Engine {
                 self.playing = false;
             }
             Command::Seek(seconds) => {
-                let target = Duration::from_secs_f64(seconds.max(0.0));
+                // rodio's try_seek takes *output* time, so at any speed but 1 a track position
+                // has to be divided by the speed or the seek lands at position * speed (measured:
+                // seeking to 50 s at 0.8x landed at 40 s).
+                let speed = self.speed_of(self.active) as f64;
+                let target = Duration::from_secs_f64(seconds.max(0.0) / speed);
                 if let Err(error) = self.decks[self.active].sink.try_seek(target) {
                     eprintln!("[internal][tauri][warn] native audio seek failed: {error}");
                 }
@@ -881,9 +928,9 @@ impl Engine {
                 }
             }
             Command::Rate(rate) => {
-                self.rate = rate.clamp(0.25, 4.0);
-                for deck in &self.decks {
-                    deck.sink.set_speed(self.rate);
+                self.rate = rate.clamp(MIN_SPEED, MAX_SPEED);
+                for index in 0..self.decks.len() {
+                    self.decks[index].sink.set_speed(self.speed_of(index));
                 }
             }
             Command::Transition { track_id, fade_ms, reply } => {
@@ -916,7 +963,7 @@ impl Engine {
                 self.decks[standby]
                     .sink
                     .set_volume(if fade_ms > 0 { incoming_from } else { target });
-                self.decks[standby].sink.set_speed(self.rate);
+                self.decks[standby].sink.set_speed(self.speed_of(standby));
                 self.decks[standby].sink.play();
 
                 let outgoing = self.active;
@@ -945,7 +992,7 @@ impl Engine {
                     return false;
                 }
                 self.cancel_fade();
-                self.decks[standby].sink.set_speed(self.rate);
+                self.decks[standby].sink.set_speed(self.speed_of(standby));
                 self.decks[standby].sink.set_volume(volume.clamp(0.0, self.output_volume()));
                 self.decks[standby].sink.play();
                 let _ = reply.send(true);
@@ -960,7 +1007,13 @@ impl Engine {
                 let standby = self.standby();
                 let matched = self.decks[standby].track_id.as_deref() == Some(track_id.as_str());
                 if matched {
-                    let ok = self.decks[standby].sink.try_seek(Duration::from_secs_f64(seconds.max(0.0))).is_ok();
+                    // Track time -> output time, as for `Seek`.
+                    let speed = self.speed_of(standby) as f64;
+                    let ok = self
+                        .decks[standby]
+                        .sink
+                        .try_seek(Duration::from_secs_f64(seconds.max(0.0) / speed))
+                        .is_ok();
                     let _ = reply.send(ok);
                 } else { let _ = reply.send(false); }
             }
@@ -977,6 +1030,16 @@ impl Engine {
                 self.decks[standby]
                     .sink
                     .set_volume(standby_volume.clamp(0.0, self.output_volume()));
+            }
+            Command::SetDeckTempos { active_tempo, standby_tempo } => {
+                // Unlike volumes, tempo is not owned by a running fade: the fade only ramps
+                // levels, so a DJ can keep nudging the incoming deck's tempo while it comes in.
+                let standby = self.standby();
+                let active = self.active;
+                self.decks[active].tempo = active_tempo.clamp(MIN_TEMPO, MAX_TEMPO);
+                self.decks[standby].tempo = standby_tempo.clamp(MIN_TEMPO, MAX_TEMPO);
+                self.decks[active].sink.set_speed(self.speed_of(active));
+                self.decks[standby].sink.set_speed(self.speed_of(standby));
             }
             Command::HasStandby { track_id, reply } => {
                 let standby = self.standby();
@@ -1036,12 +1099,16 @@ impl Engine {
                 track_id: None,
                 duration_sec: 0.0,
                 health: None,
+                tempo: 1.0,
+                position: None,
             },
             Deck {
                 sink: Player::connect_new(stream.mixer()),
                 track_id: None,
                 duration_sec: 0.0,
                 health: None,
+                tempo: 1.0,
+                position: None,
             },
         ];
         for deck in &decks {
@@ -1096,6 +1163,12 @@ impl Engine {
                 }
             },
         }
+    }
+
+    /// What a deck's sink should be told to play at: the global rate (the Settings speed) times
+    /// that deck's own tempo fader, kept inside the range the sink handles well.
+    fn speed_of(&self, index: usize) -> f32 {
+        (self.rate * self.decks[index].tempo).clamp(MIN_SPEED, MAX_SPEED)
     }
 
     fn cancel_fade(&mut self) {
@@ -1158,7 +1231,7 @@ impl Engine {
             "native-audio-position",
             PositionEvent {
                 track_id,
-                position_sec: self.decks[index].sink.get_pos().as_secs_f64(),
+                position_sec: self.decks[index].position_sec(),
                 duration_sec: self.decks[index].duration_sec,
             },
         );

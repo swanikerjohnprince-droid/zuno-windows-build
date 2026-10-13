@@ -179,9 +179,16 @@ export class PlayerController {
   private loadedTrackId: string | null = null;
   /** True while DJ/Split Mode owns a live standby deck. */
   private djDeckActive = false;
+  /**
+   * The track DJ Mode held at its end (see `handleTrackEnded`). A deck that ran out has nothing
+   * left on it — the audio was consumed as it played — so playing it again has to reload rather
+   * than resume. Tracked here instead of inferred from "position is near the duration", because
+   * provider durations can be off by seconds and then the check silently never matches.
+   */
+  private heldAtEndTrackId: string | null = null;
   /** Finished peaks by track id, and in-flight decodes, so a re-render never decodes twice. */
-  private readonly waveformCache = new Map<string, Uint8Array>();
-  private readonly waveformInFlight = new Map<string, Promise<Uint8Array | null>>();
+  private readonly waveformCache = new Map<string, rustAudio.TrackAnalysis>();
+  private readonly waveformInFlight = new Map<string, Promise<rustAudio.TrackAnalysis | null>>();
   private isTabActive = false;
   private playTrackRequestId = 0;
   private autoplayEnabled = false;
@@ -362,6 +369,12 @@ export class PlayerController {
     const track = this.state.currentTrack;
     if (!track) return false;
 
+    if (this.heldAtEndTrackId === track.id) {
+      // Ran to its end under DJ Mode: nothing is left on the deck to resume, so start it over.
+      // Goes through the normal load, which keeps Deck B (`djDeckActive`) and clears the marker.
+      return this.playTrackById(track.id);
+    }
+
     try {
       // Replacing Deck A clears loadedTrackId, so load the replacement into the active
       // native deck before starting it. This deliberately bypasses play(), which claims
@@ -408,6 +421,7 @@ export class PlayerController {
 
   async loadTrack(track: Track, preserveDjDeck = false): Promise<void> {
     logInternalInfo("PlayerController.loadTrack start", { trackId: track.id, preserveDjDeck });
+    this.heldAtEndTrackId = null;
     // A normal Zuno load owns the whole playback surface and must not leave a DJ standby
     // deck sounding underneath it. DJ Mode explicitly opts out so Deck A can coexist with Deck B.
     if (!preserveDjDeck) {
@@ -441,6 +455,7 @@ export class PlayerController {
     autoplayWhenQueueEnds = false,
     shufflePlaylist = false,
   ): Promise<boolean> {
+    this.heldAtEndTrackId = null;
     // Close out whatever was playing first: this is the funnel every track change goes
     // through, so it catches a natural end and a skip with the same one call.
     this.finishPlayReport();
@@ -1033,6 +1048,23 @@ export class PlayerController {
       // repeat-one, consume the stop-after marker, or advance the queue.
       if (await this.recoverFromPrematureEnd()) return;
 
+      /*
+       * A live DJ deck changes what "the track ended" should mean. Every branch below picks
+       * *some* next track and auto-advances into it — right for ordinary continuous listening,
+       * which is the point of autoplay, but not while DJ Mode has Deck B cued or playing: the
+       * auto-picked track has nothing to do with Deck B, and it loads onto Deck A at the
+       * engine's own full volume regardless of where the crossfader is, which is what cuts over
+       * whatever Deck B was doing. Mixxx's decks never auto-advance either — nothing moves a
+       * deck but the person at the controls — so a deck that runs out just stops, as on a real
+       * mixer. `warmNextTrack` and `onTransitionTick` already stand down for the same reason;
+       * this is the one advance path they don't cover, because it runs after the track is over.
+       */
+      if (this.djDeckActive) {
+        this.heldAtEndTrackId = this.state.currentTrack?.id ?? null;
+        this.setState({ status: "paused" });
+        return;
+      }
+
       if (this.playbackOrderMode === "repeat-one" && this.state.currentTrack) {
         await this.playTrackById(this.state.currentTrack.id);
         return;
@@ -1545,8 +1577,8 @@ export class PlayerController {
   }
 
   /**
-   * Full-track peaks (0-255, `buckets` of them) for DJ Mode's waveform, or null when none can be
-   * produced right now: not on the Rust engine, or a streaming track that is not loaded onto a
+   * Waveform peaks plus tempo (BPM, confidence, beat grid) for DJ Mode, from one decode, or null
+   * when none can be produced right now: not on the Rust engine, or a streaming track that is not loaded onto a
    * deck yet (so there is no downloaded data to analyse). A null is never cached, so asking
    * again once the track is playing works.
    *
@@ -1556,7 +1588,7 @@ export class PlayerController {
    * `STREAM_BUFFERS` in lib.rs. Results are cached per track and bucket count; concurrent
    * callers share one decode.
    */
-  async getWaveform(track: Track, buckets: number): Promise<Uint8Array | null> {
+  async getTrackAnalysis(track: Track, buckets: number): Promise<rustAudio.TrackAnalysis | null> {
     if (!this.audioEngine.usesRustAudio()) return null;
     const key = `${track.id}:${buckets}`;
     const cached = this.waveformCache.get(key);
@@ -1572,13 +1604,13 @@ export class PlayerController {
     }
 
     const job = rustAudio
-      .waveform(track.id, source, buckets)
-      .then((peaks) => {
-        this.waveformCache.set(key, peaks);
-        return peaks;
+      .analyseTrack(track.id, source, buckets)
+      .then((analysis) => {
+        this.waveformCache.set(key, analysis);
+        return analysis;
       })
       .catch((error: unknown) => {
-        logInternalWarn("PlayerController.getWaveform unavailable", {
+        logInternalWarn("PlayerController.getTrackAnalysis unavailable", {
           trackId: track.id,
           error: error instanceof Error ? error.message : String(error),
         });
@@ -1602,6 +1634,11 @@ export class PlayerController {
   /** Sets the active/standby deck volumes from the DJ crossfader. */
   async setDjDeckVolumes(activeVolume: number, standbyVolume: number): Promise<void> {
     await this.audioEngine.setDeckVolumes(activeVolume, standbyVolume);
+  }
+
+  /** Sets the active/standby deck tempos from the DJ pitch faders (multipliers, 1 = unchanged). */
+  async setDjDeckTempos(activeTempo: number, standbyTempo: number): Promise<void> {
+    await this.audioEngine.setDeckTempos(activeTempo, standbyTempo);
   }
 
   getCuedDuration(track: Track): number {
