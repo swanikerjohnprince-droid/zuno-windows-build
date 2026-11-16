@@ -1,0 +1,126 @@
+# Publishes zuno to the AUR whenever a release is published.
+#
+# Runs from CI because the AUR needs an Arch environment and an SSH key, and the maintainer
+# develops on Windows — doing this by hand meant either a VM or the package going stale.
+#
+# Requires one repository secret:
+#   AUR_SSH_PRIVATE_KEY — the private half of the SSH key registered on the AUR account
+name: AUR
+
+on:
+  # `workflow_run`, not `release: published`.
+  #
+  # The release is cut by GITHUB_TOKEN, and GitHub deliberately refuses to let a token-created
+  # event trigger further workflows — so `release: published` never fired once. Every AUR
+  # publish so far has been a manual dispatch, which is exactly how the package ended up two
+  # versions behind without anyone noticing.
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  # Lets a botched package be re-pushed without cutting another release.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, without the leading v (e.g. 1.2.1)"
+        required: true
+
+# Publishing happens over SSH to the AUR, not through the GitHub token.
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    # A release that did not build is not a release to package.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `workflow_run` checks out the default branch head by default, which is usually but
+          # not always the commit that was released.
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            # package.json is the same source the release workflow reads, so the two cannot
+            # disagree about what was just shipped. There is no tag in a `workflow_run` event.
+            version="$(grep -m1 '"version"' package.json | cut -d'"' -f4)"
+          fi
+          echo "Publishing zuno ${version}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install packaging tools
+        run: |
+          pacman -Syu --noconfirm --needed git openssh pacman-contrib sudo
+          # makepkg and everything built on it — updpkgsums, --printsrcinfo — refuse to run
+          # as root, and the container is root. One unprivileged user serves all of them.
+          useradd -m builder
+          # `makepkg -s` installs the declared dependencies, which needs pacman.
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+
+      - name: Update version and checksum
+        working-directory: packaging/aur/zuno
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          sed -i "s/^pkgver=.*/pkgver=${version}/" PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          chown -R builder .
+          # updpkgsums downloads the released .deb and rewrites sha256sums from what actually
+          # shipped, rather than trusting a hash edited by hand alongside the version.
+          #
+          # .SRCINFO is what the AUR reads — not the PKGBUILD — so a stale one silently serves
+          # the old version even after a successful push.
+          su builder -c "updpkgsums && makepkg --printsrcinfo > .SRCINFO"
+
+      - name: Build it before anyone else has to
+        working-directory: packaging/aur/zuno
+        run: su builder -c "makepkg -sf --noconfirm"
+
+      - name: Publish
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+
+          mkdir -p ~/.ssh
+          echo "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          # `accept-new` rather than a keyscan: a keyscan that returns nothing fails silently
+          # and leaves an empty known_hosts, which is what broke the first run. This trusts
+          # the host on first contact and pins it for the rest of the job, and unlike
+          # StrictHostKeyChecking=no it still rejects a key that changes mid-run.
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+
+          git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+
+          # A package that does not exist yet clones as an *empty* repo rather than failing, so
+          # this one command covers both the first publish and every one after it.
+          #
+          # Deliberately no `|| initialise an empty repo` fallback. The package exists now, so a
+          # clone that fails means the server said no — and during an AUR maintenance window
+          # that fallback reported "No AUR repo yet", built a root commit with no history, and
+          # tried to push it over the real package. It was saved only by push rejecting a
+          # non-fast-forward. A failure here should stop the job and be read.
+          git clone ssh://aur@aur.archlinux.org/zuno.git /tmp/aur
+
+          # Only these two files belong in an AUR repo — no sources, no built packages.
+          cp packaging/aur/zuno/PKGBUILD packaging/aur/zuno/.SRCINFO /tmp/aur/
+
+          cd /tmp/aur
+          # `--quiet` alone reports nothing on a fresh repo where the files are untracked.
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "AUR already at ${version}, nothing to push."
+            exit 0
+          fi
+          git commit -m "zuno ${version}"
+          git push -u origin master

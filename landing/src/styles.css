@@ -1,0 +1,369 @@
+@import "tailwindcss";
+
+/*
+ * The app's token layer, copied rather than imported.
+ *
+ * `src/ui/styles/global.css` is full of things a website has no use for — window rounding,
+ * titlebar heights, Paper-PC overrides, scrollbar hiding — and importing across project
+ * boundaries would make the site's build depend on the desktop app's stylesheet staying
+ * website-safe. These are the colour tokens only, byte-identical to the app's, so the two
+ * genuinely match. If the brand shifts, both change together by hand.
+ */
+@theme {
+  --color-background: oklch(0.145 0 0);
+  --color-foreground: oklch(0.985 0 0);
+
+  --color-card: oklch(0.285 0 0);
+  --color-card-foreground: oklch(0.985 0 0);
+  --color-popover: oklch(0.205 0 0);
+  --color-popover-foreground: oklch(0.985 0 0);
+
+  --color-muted: oklch(0.269 0 0);
+  --color-muted-foreground: oklch(0.708 0 0);
+
+  /* Brand accent — the one colour carried over from the old identity. */
+  --color-primary: #ff0033;
+  --color-primary-foreground: oklch(0.985 0 0);
+
+  --color-secondary: oklch(0.269 0 0);
+  --color-secondary-foreground: oklch(0.985 0 0);
+
+  --color-destructive: oklch(0.704 0.191 22.216);
+  --color-destructive-foreground: oklch(0.985 0 0);
+
+  --color-border: oklch(1 0 0 / 10%);
+  --color-input: oklch(1 0 0 / 15%);
+  --color-ring: #ff0033;
+
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
+    monospace;
+}
+
+html[data-theme="light"] {
+  --color-background: oklch(0.954 0 0);
+  --color-foreground: oklch(0.205 0 0);
+
+  --color-card: oklch(1 0 0);
+  --color-card-foreground: oklch(0.205 0 0);
+  --color-popover: oklch(1 0 0);
+  --color-popover-foreground: oklch(0.205 0 0);
+
+  --color-muted: oklch(0.915 0 0);
+  --color-muted-foreground: oklch(0.45 0 0);
+
+  --color-secondary: oklch(0.915 0 0);
+  --color-secondary-foreground: oklch(0.205 0 0);
+
+  --color-border: oklch(0 0 0 / 10%);
+  --color-input: oklch(0 0 0 / 14%);
+
+  color-scheme: light;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: "Inter Variable", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto,
+    Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  /* Same numeral treatment as the app, so version strings and sizes do not jitter. */
+  font-feature-settings: "cv11", "tnum";
+}
+
+/* The accent earns its keep in the small places too. */
+::selection {
+  background: color-mix(in oklch, var(--color-primary) 28%, transparent);
+  color: var(--color-foreground);
+}
+
+/* Anchors land below the sticky header rather than under it. */
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 6rem;
+}
+
+/*
+ * Sections reveal as they arrive.
+ *
+ * `animation-timeline: view()` does this with no observer, no state and no JS — the browser
+ * drives it off scroll position. Unsupported engines simply see the finished state, because
+ * the rule only applies where the timeline resolves.
+ */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .reveal {
+      animation: reveal-in linear both;
+      animation-timeline: view();
+      animation-range: entry 0% cover 22%;
+    }
+  }
+}
+
+/*
+ * Film grain over the hero.
+ *
+ * A single tiling `feTurbulence` as a data URI — no image request, no canvas, no library. It is
+ * what stops a large dark surface from banding, and what stops the whole thing from reading as
+ * a stock gradient. Kept faint enough to be felt rather than seen.
+ */
+.grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.055;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/*
+ * The hero's entrance cascade.
+ *
+ * Shares `reveal-in` with the scroll-revealed sections, so the page has one arrival motion rather
+ * than two. Time-based here rather than scroll-driven, because the hero is already on screen when
+ * the page loads and has no entry to animate.
+ */
+.hero-in {
+  animation: reveal-in 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/*
+ * The moon, as an arc across the top.
+ *
+ * A circle far wider than the viewport, pushed up until only the bottom of its limb is in frame.
+ * Nothing sits behind the type — the light arrives from above it and falls away, which is the
+ * whole difference between a light source and a blurred blob parked behind a headline.
+ *
+ * The border is what draws the arc: on a `border-radius: 50%` box it follows the curve for free,
+ * and because the top of the circle is out of frame only the bottom of the ring ever shows. The
+ * outer shadow is the spill below it. The mask then fades both towards the ends, so the arc has
+ * no visible termination — it simply stops being bright.
+ */
+.moon-arc {
+  border: 1px solid oklch(1 0 0 / 0.14);
+  box-shadow:
+    0 0 90px 6px color-mix(in oklch, var(--color-primary) 20%, transparent),
+    0 0 36px 0 oklch(1 0 0 / 0.05);
+  /* Prefixed as well as standard: Safari shipped `-webkit-mask-image`, and a dropped mask here
+     would leave a hard-edged 1px circle drawn across the top of the page. */
+  -webkit-mask-image: radial-gradient(38% 34% at 50% 100%, #5e0606 0%, transparent 74%);
+  mask-image: radial-gradient(38% 34% at 50% 100%, #000 0%, transparent 74%);
+}
+
+/*
+ * Decorations that get out of the way once you start reading.
+ *
+ * `scroll(root block)` is the document's own scroll position rather than the element's view
+ * progress — which is what "fade as the page moves" actually means, and it does not care where
+ * in the hero the element happens to sit. Lengths rather than percentages in the range, because
+ * the interesting distance is the first screen of scrolling, not a fraction of the page.
+ */
+@supports (animation-timeline: scroll()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .scroll-fade {
+      animation: fade-away linear both;
+      animation-timeline: scroll(root block);
+      animation-range: 0 55vh;
+    }
+  }
+}
+
+@keyframes fade-away {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/*
+ * The floating badges.
+ *
+ * Rotation is carried in `--tilt` rather than in a class, because a `transform` inside keyframes
+ * replaces the whole property — a `rotate-3` utility beside this would simply be overwritten the
+ * moment the animation started. Each badge sets its own tilt, duration and a negative delay, so
+ * they start out of phase instead of bobbing in unison.
+ */
+.float {
+  animation: float-y 7s ease-in-out infinite alternate;
+}
+
+@keyframes float-y {
+  from {
+    transform: translateY(-0.4rem) rotate(var(--tilt, 0deg));
+  }
+  to {
+    transform: translateY(0.4rem) rotate(var(--tilt, 0deg));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .float {
+    animation: none;
+    transform: rotate(var(--tilt, 0deg));
+  }
+}
+
+/*
+ * The film stage.
+ *
+ * Taller than the viewport, with a `position: sticky` child that pins for a screen's worth of
+ * scrolling. Inside it the frame grows from a rounded card to a full-bleed one — so the demo
+ * takes the whole screen without the page ever handing it a separate route or a lightbox.
+ *
+ * `animation-timeline: view()` drives the growth off the stage's own position, which means no
+ * scroll listener, no rAF loop and no state — the same trick the sections already use to reveal.
+ * Where it is unsupported the frame renders at its finished size and simply sits there, which is
+ * also exactly what the narrow layout does on purpose.
+ */
+.film-stage {
+  position: relative;
+  height: 185svh;
+  /*
+   * The timeline is named on the stage and consumed by the frame inside it, rather than the frame
+   * reading its own `view()`. A sticky element stops moving relative to the scrollport the moment
+   * it pins, so its own view progress freezes exactly when the growth is supposed to happen. The
+   * stage never pins, so its progress is the honest one.
+   */
+  view-timeline-name: --film;
+}
+
+.film-sticky {
+  position: sticky;
+  top: 0;
+  display: flex;
+  height: 100svh;
+  align-items: center;
+  justify-content: center;
+}
+
+/*
+ * Cut to the footage, not the other way round.
+ *
+ * The capture is 4:3, so the frame is too — a 16:9 stage would crop the app's own titlebar and
+ * player bar off the top and bottom, which are the parts that make it read as a desktop window.
+ * At full size that makes the height the limiting dimension, hence the width ceiling.
+ */
+.film-frame {
+  position: relative;
+  width: min(70%, calc(100svh * 4 / 3));
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 20px;
+  background: #000;
+  box-shadow: 0 8px 40px rgb(0 0 0 / 0.45);
+}
+
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .film-frame {
+      animation: film-grow linear both;
+      animation-timeline: --film;
+      /*
+       * `contain` is the phase where the stage completely covers the viewport — which, because the
+       * stage is taller than the viewport, is precisely the span during which the frame is pinned.
+       * So the frame stays small while it slides up into place and grows only once it is holding
+       * still, over the first half of the pin.
+       */
+      animation-range: contain 0% contain 45%;
+    }
+  }
+}
+
+@keyframes film-grow {
+  from {
+    transform: scale(0.68);
+    border-radius: 24px;
+  }
+  to {
+    transform: scale(1);
+    border-radius: 0;
+  }
+}
+
+/*
+ * The wordmark's cursor.
+ *
+ * `zuno_` ends in an underscore, so it is already a prompt — this just admits it. The one
+ * piece of motion in the hero, and it belongs to the logo rather than being applied to it.
+ * Steady rather than absent under reduced motion, since the block is part of the mark.
+ */
+.caret {
+  animation: caret-blink 1.2s steps(1) infinite;
+}
+
+@keyframes caret-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  50.01%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .caret {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+/*
+ * The playing indicator, shared by the tab demo and the bento cells.
+ *
+ * Three bars on staggered delays. Paused rather than removed under reduced motion, so the mark
+ * still reads as "this is the one playing" without the movement.
+ */
+.equaliser-bar {
+  height: 100%;
+  animation: equalise 1.1s ease-in-out infinite alternate;
+  transform-origin: bottom;
+}
+
+@keyframes equalise {
+  from {
+    transform: scaleY(0.35);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .equaliser-bar {
+    animation: none;
+    transform: scaleY(0.7);
+  }
+}
+
+@keyframes reveal-in {
+  from {
+    opacity: 0;
+    transform: translateY(1.25rem);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
