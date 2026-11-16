@@ -399,3 +399,17 @@ export function useDjTempo({
   };
 
   return {
+    waveformA,
+    waveformB,
+    bpmA,
+    bpmB,
+    heardA,
+    heardB,
+    deckBRateRef,
+    tempoView,
+    tempoActions,
+    gridFor,
+    startedAtFor,
+    reapplyTempos,
+  };
+}
