@@ -11,10 +11,11 @@ This branch adds a first DJ workstation layer to Zuno.
 - Real native crossfade when `MIX A → B` is pressed.
 - Adjustable transition length.
 - Position seeking and hot-cue storage on Deck A.
-- Mixer/crossfader UI foundation for the next audio-engine pass.
+- Per-deck tempo system modeled on Mixxx (`src/analyzer/`): analyzed BPM with confidence, beat grid drawn on the waveform, tap / ½ / ×2 / clear BPM overrides (persisted in localStorage), ±8/16/50% tempo fader per deck, and SYNC between decks — all owned by `src/ui/pages/useDjTempo.ts`.
+- Crossfader gain curve ported verbatim from Mixxx (`xfadeGains()`).
 
 ## Important
 
 The real audio transition is powered by Zuno's existing Rust two-deck engine. For the full DJ feature set, the app should use the Rust/native audio engine. If Zuno is running its YouTube iframe engine, the mix action falls back to normal track playback.
 
-The current waveform is a visual beat/waveform placeholder and BPM/key values are placeholders. The next pass should add offline waveform extraction, BPM/beat-grid analysis, true per-deck EQ/filter routing, pitch/time-stretching, loops, beat jump, sync and MIDI control.
+Waveform peaks, BPM, confidence and a first-beat anchor are measured once per track by a single native Rust decode (`native_audio_waveform` → `src-tauri/src/tempo.rs`) and then reused for the readout and the grid; the beat grid is drawn at the BPM actually in use (after tap/½/×2 overrides and the tempo fader). Remaining gaps: true per-deck EQ/filter routing, pitch/time-stretching, loops, beat jump and MIDI control.
