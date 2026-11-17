@@ -600,3 +600,26 @@ export async function getLocalPlaylistTrackPage(playlist: Playlist): Promise<Tra
 
   return { tracks: scannedTracks, hasMore: false };
 }
+
+/**
+ * Whether the ad-hoc "add music from my PC" scanner is usable yet.
+ *
+ * It is not. DJ Mode can pick individual audio files off the user's disk and put them on the
+ * queue, but the Rust-side scan it needs (`local_audio_scan`) only ever ran over a whole local
+ * playlist — what a hand-picked handful of files should look like, with their artwork,
+ * duration and playlist identity, is still an open question. Shipping a half-built scanner
+ * would be worse than parking the feature, so it stays switched off until that is settled.
+ */
+export const LOCAL_AUDIO_SCAN_AVAILABLE = false;
+
+/**
+ * Placeholder for the unfinished scanner. Deliberately does no work.
+ *
+ * The DJ Mode import stays valid so the app compiles, and `LOCAL_AUDIO_SCAN_AVAILABLE` keeps
+ * the button that calls this disabled, so nothing reaches this and quietly adds no tracks.
+ *
+ * @see LOCAL_AUDIO_SCAN_AVAILABLE
+ */
+export async function scanLocalAudioPaths(_paths: string[]): Promise<Track[]> {
+  return [];
+}
