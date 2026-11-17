@@ -34,9 +34,9 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
-// Unconditional: OsRng also backs generate_slot_id, used on every platform for account slot
+// Unconditional: SysRng also backs generate_slot_id, used on every platform for account slot
 // ids, not just the macOS-only encryption key it originally served.
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::SysRng, TryRng};
 
 #[cfg(target_os = "macos")]
 mod macos_media;
@@ -312,7 +312,15 @@ fn cookie_account_identity(cookie: &str) -> Option<String> {
 
 fn generate_slot_id() -> String {
     let mut bytes = [0_u8; 16];
-    OsRng.fill_bytes(&mut bytes);
+    /*
+     * rand 0.10 renamed `OsRng` to `SysRng` and made the fill fallible: the operating system's
+     * entropy source can refuse, and there is no error channel here to report it in. The old
+     * `fill_bytes` panicked on exactly this failure, so panicking keeps the behaviour — a slot
+     * id is only ever a random label, and inventing one from a weak source would be worse.
+     */
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("system entropy source unavailable");
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -1771,7 +1779,9 @@ fn load_or_create_cookie_encryption_key() -> Result<[u8; 32], CommandError> {
         }
         Err(keyring::Error::NoEntry) => {
             let mut key = [0_u8; 32];
-            OsRng.fill_bytes(&mut key);
+            SysRng.try_fill_bytes(&mut key).map_err(|error| CommandError {
+                message: format!("session encryption key generation failed: {error}"),
+            })?;
             entry
                 .set_password(&STANDARD.encode(key))
                 .map_err(|error| CommandError {
@@ -1792,7 +1802,9 @@ fn save_youtube_music_cookie(app: &tauri::AppHandle, cookie: &str) -> Result<(),
         message: format!("session encryption setup failed: {error}"),
     })?;
     let mut nonce_bytes = [0_u8; 12];
-    OsRng.fill_bytes(&mut nonce_bytes);
+    SysRng.try_fill_bytes(&mut nonce_bytes).map_err(|error| CommandError {
+        message: format!("session encryption nonce generation failed: {error}"),
+    })?;
     let encrypted = cipher
         .encrypt(Nonce::from_slice(&nonce_bytes), cookie.as_bytes())
         .map_err(|error| CommandError {
@@ -2257,7 +2269,7 @@ fn login_partition_store_id(slot_id: &str) -> [u8; 16] {
 }
 
 /// Decodes a slot id's own hex characters back into the 16 raw bytes `generate_slot_id` drew
-/// from `OsRng` — a lossless, stable-forever encoding round-trip, not a hash. Any byte pair that
+/// from `SysRng` — a lossless, stable-forever encoding round-trip, not a hash. Any byte pair that
 /// somehow is not valid hex (should not happen for an id this code generated itself) decodes to
 /// 0 rather than panicking, so a garbled id degrades to a well-defined value instead of crashing
 /// whatever asked for it.
@@ -6302,7 +6314,7 @@ mod tests {
         let b = generate_slot_id();
         assert_eq!(a.len(), 32, "16 bytes, hex-encoded: {a}");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{a}");
-        assert_ne!(a, b, "two draws from OsRng landing on the same 128 bits would mean it is broken");
+        assert_ne!(a, b, "two draws from SysRng landing on the same 128 bits would mean it is broken");
     }
 
     #[test]

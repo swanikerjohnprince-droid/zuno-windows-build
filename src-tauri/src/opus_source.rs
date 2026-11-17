@@ -14,13 +14,13 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use rodio::{ChannelCount, SampleRate, Source};
-use symphonia::core::codecs::CODEC_TYPE_OPUS;
+use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
 use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
+use symphonia::core::units::{Time, TimeBase, Timestamp};
 
 /// Opus always decodes at 48 kHz, whatever the source was encoded from. Fixed by RFC 6716.
 const OPUS_SAMPLE_RATE: u32 = 48_000;
@@ -107,16 +107,17 @@ fn container_mime_of(header: &[u8]) -> Option<&'static str> {
  * `None` means the container did not say, and the caller falls back to the duration the provider
  * already reported for the track.
  */
-fn container_duration(
-    time_base: Option<symphonia::core::units::TimeBase>,
-    n_frames: Option<u64>,
-) -> Option<Duration> {
+fn container_duration(time_base: Option<TimeBase>, n_frames: Option<u64>) -> Option<Duration> {
     let (time_base, frames) = (time_base?, n_frames?);
-    if time_base.numer == 0 || time_base.denom == 0 {
-        return None;
-    }
-    let time = time_base.calc_time(frames);
-    Some(Duration::from_secs_f64(time.seconds as f64 + time.frac))
+    /*
+     * symphonia 0.6 counts time in `Timestamp`s rather than raw `u64`s, so a frame count that
+     * does not fit a signed 64-bit timestamp has no representation and the duration is
+     * unknown. `calc_time` returns `None` for the same reason when the multiplication
+     * overflows; both are "the container did not say", not a failure.
+     */
+    let frames = i64::try_from(frames).ok()?;
+    let time = time_base.calc_time(Timestamp::new(frames))?;
+    Some(Duration::from_secs_f64(time.as_secs_f64()))
 }
 
 pub(crate) struct OpusSource {
@@ -156,25 +157,41 @@ impl OpusSource {
             hint.with_extension("ogg");
         }
 
-        let probed = symphonia::default::get_probe()
-            .format(
-                &hint,
-                stream,
-                &FormatOptions { enable_gapless: true, ..Default::default() },
-                &MetadataOptions::default(),
-            )
+        /*
+         * symphonia 0.6 probes and returns the reader in one step — there is no `Probed` wrapper
+         * to unwrap — and the options are taken by value. Gapless playback is no longer an
+         * opt-in: the demuxers always trim encoder delay and padding themselves.
+         */
+        let format = symphonia::default::get_probe()
+            .probe(&hint, stream, FormatOptions::default(), MetadataOptions::default())
             .map_err(|error| format!("opus container probe failed: {error}"))?;
-        let format = probed.format;
 
+        /*
+         * A track's codec parameters are now an optional, tagged enum, and the codec id is a
+         * typed `AudioCodecId` rather than a bare `u32` — so "this track is Opus" is asked of
+         * the audio parameters instead of compared against a constant type.
+         */
         let track = format
             .tracks()
             .iter()
-            .find(|track| track.codec_params.codec == CODEC_TYPE_OPUS)
+            .find(|track| {
+                track
+                    .codec_params
+                    .as_ref()
+                    .and_then(|params| params.audio())
+                    .is_some_and(|audio| audio.codec == CODEC_ID_OPUS)
+            })
             .ok_or_else(|| "container holds no Opus track".to_string())?;
 
-        let params = &track.codec_params;
         let track_id = track.id;
-        let channel_count = params.channels.map(|channels| channels.count()).unwrap_or(2).max(1);
+        let channel_count = track
+            .codec_params
+            .as_ref()
+            .and_then(|params| params.audio())
+            .and_then(|audio| audio.channels.as_ref())
+            .map(|channels| channels.count())
+            .unwrap_or(2)
+            .max(1);
         let channels = ChannelCount::new(channel_count as u16)
             .ok_or_else(|| "opus track declared zero channels".to_string())?;
 
@@ -191,14 +208,19 @@ impl OpusSource {
         let decoder = opus::Decoder::new(OPUS_SAMPLE_RATE, opus_channels)
             .map_err(|error| format!("opus decoder init failed: {error}"))?;
 
-        let total_duration = container_duration(params.time_base, params.n_frames);
+        /*
+         * The time base and the frame count moved from the codec parameters onto the track
+         * itself in symphonia 0.6, and so did the encoder delay: they describe the track's
+         * timeline, not the codec's.
+         */
+        let total_duration = container_duration(track.time_base, track.num_frames);
 
         /*
          * Pre-skip. Every Opus stream begins with encoder warm-up that is not part of the
          * recording; OpusHead states how much, and playing it back is an audible tick at the
          * start of every single track.
          */
-        let skip_samples = params.delay.unwrap_or(0) as usize * channel_count;
+        let skip_samples = track.delay.unwrap_or(0) as usize * channel_count;
 
         Ok(Self {
             format,
@@ -217,7 +239,15 @@ impl OpusSource {
     fn fill(&mut self) -> bool {
         while !self.exhausted {
             let packet = match self.format.next_packet() {
-                Ok(packet) => packet,
+                /*
+                 * symphonia 0.6 reports the end of the stream as `Ok(None)` rather than as an
+                 * error, so a clean finish no longer has to travel through the error arm.
+                 */
+                Ok(Some(packet)) => packet,
+                Ok(None) => {
+                    self.exhausted = true;
+                    return false;
+                }
                 Err(SymphoniaError::IoError(error))
                     if error.kind() == std::io::ErrorKind::UnexpectedEof =>
                 {
@@ -243,7 +273,7 @@ impl OpusSource {
                 }
             };
             // A WebM file interleaves streams; packets for the video track are not ours.
-            if packet.track_id() != self.track_id {
+            if packet.track_id != self.track_id {
                 continue;
             }
 
@@ -316,11 +346,21 @@ impl Source for OpusSource {
     }
 
     fn try_seek(&mut self, position: Duration) -> Result<(), rodio::source::SeekError> {
+        /*
+         * `Time` is a newtype with private fields in symphonia 0.6, so it is built through a
+         * fallible conversion. A position that cannot be represented — non-finite, or past the
+         * end of the timestamp range — is not a seek this source can honour.
+         */
+        let time = Time::try_from_secs_f64(position.as_secs_f64()).ok_or_else(|| {
+            eprintln!("[internal][tauri][warn] opus seek position out of range");
+            rodio::source::SeekError::NotSupported { underlying_source: "OpusSource" }
+        })?;
+
         self.format
             .seek(
                 SeekMode::Coarse,
                 SeekTo::Time {
-                    time: Time::from(position.as_secs_f64()),
+                    time,
                     track_id: Some(self.track_id),
                 },
             )
@@ -419,7 +459,7 @@ mod tests {
     #[test]
     fn duration_is_read_through_the_containers_time_base() {
         // Matroska's default timecode scale: milliseconds.
-        let mkv = container_duration(TimeBase::new(1, 1_000).into(), Some(204_061))
+        let mkv = container_duration(TimeBase::try_new(1, 1_000), Some(204_061))
             .expect("mkv duration");
         assert!(
             (mkv.as_secs_f64() - 204.061).abs() < 0.01,
@@ -428,7 +468,7 @@ mod tests {
 
         // Ogg keeps time in samples, where dividing by the rate happens to be right — the point
         // is that one formula covers both because it asks the container.
-        let ogg = container_duration(TimeBase::new(1, 48_000).into(), Some(9_794_928))
+        let ogg = container_duration(TimeBase::try_new(1, 48_000), Some(9_794_928))
             .expect("ogg duration");
         assert!(
             (ogg.as_secs_f64() - 204.06).abs() < 0.01,
@@ -438,10 +478,20 @@ mod tests {
         // Unknown stays unknown rather than becoming zero, so the caller can fall back to the
         // duration the provider reported instead of trusting a made-up one.
         assert!(container_duration(None, Some(204_061)).is_none());
-        assert!(container_duration(TimeBase::new(1, 1_000).into(), None).is_none());
+        assert!(container_duration(TimeBase::try_new(1, 1_000), None).is_none());
+
+        /*
+         * A time base with a zero numerator or denominator no longer exists as a value:
+         * symphonia 0.6 holds both in `NonZero<u32>`, so a degenerate base is rejected at
+         * construction rather than asserted on later. The equivalent guard now lives in the
+         * type, and what is left for this function to reject is a frame count that has no
+         * timestamp representation.
+         */
+        assert!(TimeBase::try_new(0, 1_000).is_none(), "a zero time base is not constructible");
+        assert!(TimeBase::try_new(1, 0).is_none(), "a zero time base is not constructible");
         assert!(
-            container_duration(Some(TimeBase { numer: 0, denom: 0 }), Some(204_061)).is_none(),
-            "a degenerate time base is unknown, not a panic — calc_time asserts on it",
+            container_duration(TimeBase::try_new(1, 1_000), Some(u64::MAX)).is_none(),
+            "a frame count that cannot be a timestamp is unknown, not a wrapped-around time",
         );
     }
 }

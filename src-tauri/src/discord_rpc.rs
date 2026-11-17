@@ -43,18 +43,20 @@ impl DiscordRpcManager {
             return Ok(());
         }
 
-        match DiscordIpcClient::new(DISCORD_CLIENT_ID) {
-            Ok(mut client) => {
-                if let Err(e) = client.connect() {
-                    return Err(format!("Failed to connect to Discord: {}", e));
-                }
-                *client_lock = Some(client);
-                let mut connected = self.connected.lock().map_err(|e| e.to_string())?;
-                *connected = true;
-                Ok(())
-            }
-            Err(e) => Err(format!("Failed to create Discord client: {}", e)),
+        /*
+         * `discord-rich-presence` 1.x dropped the fallible constructor: the client is just a
+         * socket handle now, and the only thing that can fail is the handshake. So the
+         * "failed to create the client" branch that used to live here has nothing left to
+         * report, and connecting is the first and only failure point.
+         */
+        let mut client = DiscordIpcClient::new(DISCORD_CLIENT_ID);
+        if let Err(e) = client.connect() {
+            return Err(format!("Failed to connect to Discord: {}", e));
         }
+        *client_lock = Some(client);
+        let mut connected = self.connected.lock().map_err(|e| e.to_string())?;
+        *connected = true;
+        Ok(())
     }
 
     /// Update Discord presence with current track info
