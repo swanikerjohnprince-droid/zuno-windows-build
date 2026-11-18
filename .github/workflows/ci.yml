@@ -100,3 +100,43 @@ jobs:
       - name: Typecheck
         working-directory: src-tauri
         run: cargo check --locked
+
+  # Build the actual Tauri app on both macOS architectures. This catches platform-gated
+  # Rust errors that a Linux/Windows-only test matrix cannot see.
+  macos-build:
+    name: macOS build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: Apple Silicon
+            runner: macos-26
+            target: aarch64-apple-darwin
+          - arch: Intel
+            runner: macos-26-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install native build tools
+        run: brew install cmake pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: macos-${{ matrix.target }}
+
+      - run: npm ci
+
+      - name: Build macOS installer
+        run: npm run tauri build -- --target ${{ matrix.target }} --bundles dmg
