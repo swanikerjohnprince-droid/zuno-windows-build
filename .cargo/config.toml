@@ -1,16 +1,3 @@
-# Local (uncommitted) windows-gnu link setup for `npm run tauri dev` on this machine.
-# ldwrap reorders -L args ahead of the -l group before exec'ing the real rust-lld
-# (ld.lld.exe next to it in /c/gnu-shim); without it lld fails on every -lkernel32 etc.
+# Keep CI builds portable across Windows, Linux, and Android runners.
 [build]
 jobs = 2
-rustflags = ["-Clinker=C:\\gnu-shim\\ldwrap.exe", "-Clinker-flavor=ld", "-Clink-self-contained=yes"]
-
-[profile.dev]
-debug = 0
-incremental = false
-
-[env]
-# mingw gcc for ring's build script (cc crate)
-CC = { value = "C:\\Users\\John Swaniker\\dl-mingw\\mingw64\\bin\\x86_64-w64-mingw32-gcc.exe", force = true }
-# gnu-built rustc crashed with STATUS_STACK_BUFFER_OVERRUN on big crates otherwise
-RUST_MIN_STACK = "134217728"
