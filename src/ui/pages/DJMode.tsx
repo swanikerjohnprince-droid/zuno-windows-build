@@ -6,28 +6,19 @@ import type { PlayerSession } from "../../player/PlayerController";
 import { TrackArtwork } from "../components/TrackArtwork";
 import { cn } from "@/lib/utils";
 import { OUTPUT_RESET_EVENT } from "../settings/audioOutputDevice";
-import type { TrackAnalysis } from "../../player/rustAudio";
 import {
-  DEFAULT_TEMPO_RANGE,
   RELIABLE_CONFIDENCE,
   TEMPO_RANGES,
   beatTimes,
-  clampPercent,
-  doubleBpm,
   formatBpm,
   formatPercent,
-  halveBpm,
   heardBpm,
-  parseBpmOverrides,
-  registerTap,
-  resolveBpm,
-  serializeBpmOverrides,
-  syncPercent,
-  tempoRatio,
-  type TempoRange,
 } from "./djTempo";
+import { useDjTempo, type DeckTempoActions, type DeckTempoView, type WaveformStatus } from "./useDjTempo";
 import { Marquee } from "@/components/motion/marquee";
 import { PlayIcon, PauseIcon, MusicNoteIcon, ArrowRightIcon } from "@/ui/icons";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { scanLocalAudioPaths } from "../../player/localPlaylists";
 
 /** Bounds for the operator-adjustable "MIX A → B" transition length, in seconds. */
 const MIN_TRANSITION_SEC = 1;
@@ -130,76 +121,7 @@ function formatTime(seconds: number) {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
 }
 
-/** Peaks requested per track: enough for a crisp full-width overview at 2x pixel density. */
-const WAVEFORM_BUCKETS = 1024;
-const BPM_OVERRIDES_KEY = "zuno.dj.bpmOverrides";
 const WAVEFORM_HEIGHT = 80;
-
-type WaveformStatus = "empty" | "loading" | "ready" | "unavailable";
-
-interface DeckAnalysis {
-  id: string | null;
-  status: WaveformStatus;
-  peaks: Uint8Array | null;
-  bpm: number | null;
-  bpmConfidence: number;
-  firstBeatSec: number;
-  durationSec: number;
-}
-
-const NOTHING_MEASURED = { peaks: null, bpm: null, bpmConfidence: 0, firstBeatSec: 0, durationSec: 0 };
-
-/**
- * Waveform and tempo for a deck's track, from the one decode Rust does of it, cached by the
- * controller. Streaming tracks are analysed from the buffer their own playback is filling, so they
- * only have an analysis once they are actually loaded onto a deck — `retryKey` is how a deck says
- * "that has changed, ask again" (Deck A flips it when playback starts; Deck B when it is played).
- * A track with nothing to give is shown as having none, never as a generated stand-in: a made-up
- * waveform or BPM is worse than none, because a DJ beat-matches off them.
- */
-function useTrackAnalysis(playerController: PlayerControllerActions, track: Track | null, retryKey: boolean): DeckAnalysis {
-  const [result, setResult] = useState<DeckAnalysis>({ id: null, status: "empty", ...NOTHING_MEASURED });
-  const resultRef = useRef(result);
-  resultRef.current = result;
-  const trackId = track?.id ?? null;
-
-  useEffect(() => {
-    if (!track) {
-      setResult({ id: null, status: "empty", ...NOTHING_MEASURED });
-      return;
-    }
-    // Already measured for this track: a retry signal must not blank a working waveform.
-    if (resultRef.current.id === track.id && resultRef.current.status === "ready") return;
-    let cancelled = false;
-    setResult({ id: track.id, status: "loading", ...NOTHING_MEASURED });
-    void playerController.getTrackAnalysis(track, WAVEFORM_BUCKETS).then((analysis: TrackAnalysis | null) => {
-      if (cancelled) return;
-      setResult(
-        analysis
-          ? {
-              id: track.id,
-              status: "ready",
-              peaks: analysis.peaks,
-              bpm: analysis.bpm,
-              bpmConfidence: analysis.bpmConfidence,
-              firstBeatSec: analysis.firstBeatSec,
-              durationSec: analysis.durationSec,
-            }
-          : { id: track.id, status: "unavailable", ...NOTHING_MEASURED },
-      );
-    });
-    return () => {
-      cancelled = true;
-    };
-    // Keyed on the id: a new Track object for the same song must not trigger a second decode.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trackId, retryKey, playerController]);
-
-  // A result for the previous track must never draw under the new one for even one frame.
-  return result.id === trackId
-    ? result
-    : { id: trackId, status: trackId ? "loading" : "empty", ...NOTHING_MEASURED };
-}
 
 /**
  * The whole song at once, left to right, with the played part lit — the overview a DJ uses to
@@ -423,33 +345,6 @@ function Waveform({
       )}
     </div>
   );
-}
-
-/** Everything a deck's tempo panel shows, worked out by `DJMode` so the panel is just a view. */
-interface DeckTempoView {
-  /** The track's own BPM: the one set by hand if there is one, otherwise the measured one. */
-  bpm: number | null;
-  confidence: number;
-  /** Still being measured. */
-  analysing: boolean;
-  overridden: boolean;
-  /** Fader position, as a percent. */
-  percent: number;
-  range: TempoRange;
-  /** Settings' playback speed, which multiplies with the fader. */
-  globalRate: number;
-  canSync: boolean;
-  notice: string | null;
-}
-
-interface DeckTempoActions {
-  onPercent: (percent: number) => void;
-  onRange: (range: TempoRange) => void;
-  onSync: () => void;
-  onTap: () => void;
-  onHalve: () => void;
-  onDouble: () => void;
-  onClearBpm: () => void;
 }
 
 const TEMPO_BUTTON =
@@ -841,6 +736,7 @@ const DjQueue = memo(function DjQueue({
   onLoadA,
   onLoadB,
   onDragTarget,
+  onAddLocalFiles,
 }: {
   deckAId: string | null;
   deckBId: string | null;
@@ -849,6 +745,7 @@ const DjQueue = memo(function DjQueue({
   onLoadA: (track: Track) => void;
   onLoadB: (track: Track) => void;
   onDragTarget: (target: DragTarget) => void;
+  onAddLocalFiles: () => void;
 }) {
   const queue = useStableQueue();
   const [ghost, setGhost] = useState<{ track: Track; x: number; y: number; over: "A" | "B" | null } | null>(null);
@@ -956,9 +853,19 @@ const DjQueue = memo(function DjQueue({
             Drag a track onto a deck, or press A / B to load it. Your main Zuno queue stays here.
           </div>
         </div>
-        <span className="shrink-0 rounded-full bg-muted px-2 py-1 text-[9px] font-bold text-muted-foreground">
-          {queue.length} TRACKS
-        </span>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={onAddLocalFiles}
+            title="Pick audio files from your PC and add them to the queue"
+            className="rounded-full bg-primary px-2.5 py-1 text-[9px] font-bold tracking-wider text-primary-foreground transition-colors hover:bg-primary/90"
+          >
+            + ADD FROM PC
+          </button>
+          <span className="rounded-full bg-muted px-2 py-1 text-[9px] font-bold text-muted-foreground">
+            {queue.length} TRACKS
+          </span>
+        </div>
       </div>
       <div className="min-h-0 flex-1 overflow-auto pr-1">
         {queue.map((track, index) => (
@@ -1021,32 +928,18 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   // The scrolling page body, so a drag near its top or bottom edge can scroll it.
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // --- tempo ---------------------------------------------------------------------------------
-  const [tempoRange, setTempoRange] = useState<TempoRange>(DEFAULT_TEMPO_RANGE);
-  // Fader position per *track*, not per deck: a mix promotes Deck B to Deck A, and the track
-  // keeps the tempo it was beat-matched at without anything having to be carried across.
-  const [tempoByTrack, setTempoByTrack] = useState<Record<string, number>>({});
-  // BPMs set by hand (tap, half, double), remembered across sessions. The measurement is always
-  // re-done and never overwritten by these: clearing one goes back to what was measured.
-  const [bpmOverrides, setBpmOverrides] = useState<Record<string, number>>(() => {
-    try {
-      return parseBpmOverrides(window.localStorage.getItem(BPM_OVERRIDES_KEY));
-    } catch {
-      return {};
-    }
+  // --- tempo: one hook owns the analysis, faders, BPM overrides, SYNC and the engine send ------
+  const deckA = session.currentTrack;
+  const djTempo = useDjTempo({
+    playerController,
+    deckA,
+    deckB,
+    deckAPlaying: session.status === "playing",
+    deckBPlaying,
+    setDeckBStartedAt,
   });
-  const [tempoNotice, setTempoNotice] = useState<{ A: string | null; B: string | null }>({ A: null, B: null });
-  const tapsRef = useRef<{ A: number[]; B: number[] }>({ A: [], B: [] });
-  const noticeTimers = useRef<{ A?: number; B?: number }>({});
-  /** What the engine should have been told, readable from callbacks that outlive a render. */
-  const temposRef = useRef<[number, number]>([1, 1]);
-  /**
-   * How fast Deck B's playhead advances, in track seconds per wall second. Deck B has no position
-   * events from Rust, only this clock, so it has to run at the deck's real speed or it drifts away
-   * from the audio the moment the tempo is not 1.
-   */
-  const deckBRateRef = useRef(1);
-  const startedAtFor = (position: number) => Date.now() - (position * 1000) / deckBRateRef.current;
+  const waveformA = djTempo.waveformA;
+  const waveformB = djTempo.waveformB;
   const [trimA, setTrimA] = useState(1);
   const [trimB, setTrimB] = useState(1);
   const [transitionSec, setTransitionSec] = useState(DEFAULT_TRANSITION_SEC);
@@ -1060,11 +953,11 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   // is — nothing is playing on a deck that was just created), and re-send the mixer levels,
   // which a fresh deck starts without. A ref, not state: this subscription must not be torn
   // down and re-added on every render just to see the latest Deck B.
-  const outputResetRef = useRef({ deckB, deckMixVolumes, playerController });
-  outputResetRef.current = { deckB, deckMixVolumes, playerController };
+  const outputResetRef = useRef({ deckB, deckMixVolumes, playerController, reapplyTempos: djTempo.reapplyTempos });
+  outputResetRef.current = { deckB, deckMixVolumes, playerController, reapplyTempos: djTempo.reapplyTempos };
   useEffect(() => {
     const onReset = () => {
-      const { deckB: current, deckMixVolumes: volumes, playerController: controller } = outputResetRef.current;
+      const { deckB: current, deckMixVolumes: volumes, playerController: controller, reapplyTempos } = outputResetRef.current;
       setDeckBPlaying(false);
       setDeckBStartedAt(null);
       if (!current) return;
@@ -1072,7 +965,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
         if (!ready) return;
         setDeckBDuration(controller.getCuedDuration(current));
         void controller.setDjDeckVolumes(volumes[0], volumes[1]);
-        void controller.setDjDeckTempos(temposRef.current[0], temposRef.current[1]);
+        reapplyTempos();
       });
     };
     window.addEventListener(OUTPUT_RESET_EVENT, onReset);
@@ -1124,196 +1017,6 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playerController]);
 
-  const deckA = session.currentTrack;
-  const waveformA = useTrackAnalysis(playerController, deckA, session.status === "playing");
-  const waveformB = useTrackAnalysis(playerController, deckB, deckBPlaying);
-
-  // --- tempo: what is heard, per deck ----------------------------------------------------------
-  const globalRate = playerController.getPlaybackRate();
-  const overrideA = deckA ? bpmOverrides[deckA.id] : undefined;
-  const overrideB = deckB ? bpmOverrides[deckB.id] : undefined;
-  const bpmA = resolveBpm(waveformA.bpm, overrideA);
-  const bpmB = resolveBpm(waveformB.bpm, overrideB);
-  const pctA = deckA ? (tempoByTrack[deckA.id] ?? 0) : 0;
-  const pctB = deckB ? (tempoByTrack[deckB.id] ?? 0) : 0;
-  const heardA = bpmA === null ? null : heardBpm(bpmA, pctA, globalRate);
-  const heardB = bpmB === null ? null : heardBpm(bpmB, pctB, globalRate);
-  const deckBRate = globalRate * tempoRatio(pctB);
-  temposRef.current = [tempoRatio(pctA), tempoRatio(pctB)];
-
-  // The engine resets a deck's tempo when a track loads onto it, and the fader here is remembered
-  // per track, so a track that is no longer on a deck must not keep a stale position: loading it
-  // again would show the fader somewhere the engine is not.
-  useEffect(() => {
-    setTempoByTrack((current) => {
-      let changed = false;
-      const next: Record<string, number> = {};
-      for (const [id, percent] of Object.entries(current)) {
-        if (id === deckA?.id || id === deckB?.id) next[id] = percent;
-        else changed = true;
-      }
-      return changed ? next : current;
-    });
-  }, [deckA?.id, deckB?.id]);
-
-  // Tell the engine. Also when a deck starts playing: that is when a track that was loaded since
-  // the last send has just come up at its own speed.
-  useEffect(() => {
-    void playerController.setDjDeckTempos(tempoRatio(pctA), tempoRatio(pctB));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pctA, pctB, deckA?.id, deckB?.id, session.status === "playing", deckBPlaying, playerController]);
-
-  // A tempo change must not move Deck B's playhead: what has played so far was played at the old
-  // rate, so the clock's start is shifted to make the same position come out at the new one.
-  useEffect(() => {
-    const previous = deckBRateRef.current;
-    if (previous === deckBRate) return;
-    deckBRateRef.current = deckBRate;
-    setDeckBStartedAt((started) =>
-      started === null ? null : Date.now() - ((Date.now() - started) * previous) / deckBRate,
-    );
-  }, [deckBRate]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(BPM_OVERRIDES_KEY, serializeBpmOverrides(bpmOverrides));
-    } catch {
-      // Private mode or a full quota: the overrides just do not outlive the session.
-    }
-  }, [bpmOverrides]);
-
-  useEffect(() => () => {
-    window.clearTimeout(noticeTimers.current.A);
-    window.clearTimeout(noticeTimers.current.B);
-  }, []);
-
-  const flashNotice = (side: "A" | "B", text: string) => {
-    setTempoNotice((current) => ({ ...current, [side]: text }));
-    window.clearTimeout(noticeTimers.current[side]);
-    noticeTimers.current[side] = window.setTimeout(
-      () => setTempoNotice((current) => ({ ...current, [side]: null })),
-      3500,
-    );
-  };
-
-  const setTempoPercent = (side: "A" | "B", percent: number) => {
-    const track = side === "A" ? deckA : deckB;
-    if (!track) return;
-    const clamped = clampPercent(percent, tempoRange);
-    setTempoByTrack((current) => ({ ...current, [track.id]: clamped }));
-  };
-
-  const changeTempoRange = (range: TempoRange) => {
-    setTempoRange(range);
-    setTempoByTrack((current) =>
-      Object.fromEntries(Object.entries(current).map(([id, percent]) => [id, clampPercent(percent, range)])),
-    );
-  };
-
-  const setBpmOverride = (trackId: string, bpm: number | null) => {
-    setBpmOverrides((current) => {
-      // Re-inserted at the end so insertion order stays recency, which is what the saved list keeps.
-      const { [trackId]: _removed, ...rest } = current;
-      return bpm === null ? rest : { ...rest, [trackId]: Math.round(bpm * 100) / 100 };
-    });
-  };
-
-  const syncDeck = (side: "A" | "B") => {
-    const track = side === "A" ? deckA : deckB;
-    const own = side === "A" ? bpmA : bpmB;
-    const target = side === "A" ? heardB : heardA;
-    const other = side === "A" ? "B" : "A";
-    if (!track || own === null || target === null) return;
-    let range: TempoRange = tempoRange;
-    let result = syncPercent(own, target, range, globalRate);
-    if (result && !result.inRange) {
-      // Widen to the narrowest range that reaches it, rather than stopping short and leaving the
-      // decks audibly apart. Never narrows: that is for the person to do.
-      const widest = TEMPO_RANGES[TEMPO_RANGES.length - 1];
-      const wide = syncPercent(own, target, widest, globalRate);
-      if (wide?.inRange) {
-        range = TEMPO_RANGES.find((candidate) => candidate >= Math.abs(wide.percent)) ?? widest;
-        setTempoRange(range);
-        result = syncPercent(own, target, range, globalRate);
-      }
-    }
-    if (!result) return;
-    const percent = result.percent;
-    setTempoByTrack((current) => ({ ...current, [track.id]: percent }));
-    flashNotice(
-      side,
-      !result.inRange
-        ? `Out of range — nearest is ${formatPercent(percent)}`
-        : result.multiple === 1
-          ? `Synced to Deck ${other}`
-          : `Synced to Deck ${other} at ${result.multiple === 2 ? "double" : "half"} time`,
-    );
-  };
-
-  const tapDeck = (side: "A" | "B") => {
-    const track = side === "A" ? deckA : deckB;
-    if (!track) return;
-    const { taps, bpm } = registerTap(tapsRef.current[side], performance.now());
-    tapsRef.current[side] = taps;
-    if (bpm === null) {
-      if (taps.length === 1) flashNotice(side, "Keep tapping along with the beat…");
-      return;
-    }
-    // Taps follow what is heard, which includes the fader; the track's own BPM is what is stored.
-    const percent = side === "A" ? pctA : pctB;
-    setBpmOverride(track.id, bpm / (globalRate * tempoRatio(percent)));
-  };
-
-  const tempoView = (side: "A" | "B"): DeckTempoView => {
-    const isA = side === "A";
-    const analysis = isA ? waveformA : waveformB;
-    const own = isA ? bpmA : bpmB;
-    const otherHeard = isA ? heardB : heardA;
-    return {
-      bpm: own,
-      confidence: analysis.bpmConfidence,
-      analysing: analysis.status === "loading",
-      overridden: (isA ? overrideA : overrideB) !== undefined,
-      percent: isA ? pctA : pctB,
-      range: tempoRange,
-      globalRate,
-      canSync: own !== null && otherHeard !== null,
-      notice: tempoNotice[side],
-    };
-  };
-
-  const tempoActions = (side: "A" | "B"): DeckTempoActions => {
-    const track = side === "A" ? deckA : deckB;
-    const own = side === "A" ? bpmA : bpmB;
-    return {
-      onPercent: (percent) => setTempoPercent(side, percent),
-      onRange: changeTempoRange,
-      onSync: () => syncDeck(side),
-      onTap: () => tapDeck(side),
-      onHalve: () => {
-        if (track && own !== null) setBpmOverride(track.id, halveBpm(own));
-      },
-      onDouble: () => {
-        if (track && own !== null) setBpmOverride(track.id, doubleBpm(own));
-      },
-      onClearBpm: () => {
-        if (track) setBpmOverride(track.id, null);
-      },
-    };
-  };
-
-  /**
-   * The beat grid is only drawn while the BPM in use is the measured one or an exact half or
-   * double of it: the first beat the grid is anchored to comes from the measurement, and a tapped
-   * BPM that is some other number has no known relationship to it, so lines drawn from it would
-   * look authoritative and sit in the wrong places.
-   */
-  const gridFor = (analysis: DeckAnalysis, inUse: number | null) => {
-    if (analysis.bpm === null || inUse === null || analysis.durationSec <= 0) return null;
-    const ratio = inUse / analysis.bpm;
-    if (![0.5, 1, 2].some((multiple) => Math.abs(ratio - multiple) < 0.005 * multiple)) return null;
-    return { firstBeatSec: analysis.firstBeatSec, bpm: inUse, durationSec: analysis.durationSec };
-  };
   const durationA = deckA?.durationSec ?? playerController.getDuration();
   const durationB = deckBDuration || deckB?.durationSec || 0;
 
@@ -1351,7 +1054,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   useEffect(() => {
     if (!deckBPlaying || !deckBStartedAt || !durationB) return;
     const timer = window.setInterval(() => {
-      const elapsed = ((Date.now() - deckBStartedAt) / 1000) * deckBRateRef.current;
+      const elapsed = ((Date.now() - deckBStartedAt) / 1000) * djTempo.deckBRateRef.current;
       setDeckBPosition(Math.min(durationB, elapsed));
       if (elapsed >= durationB) {
         setDeckBPlaying(false);
@@ -1382,9 +1085,9 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
       if (!ready) return;
       setDeckBDuration(playerController.getCuedDuration(deckB));
       // A freshly loaded deck starts at its own speed; tell it where the fader is.
-      void playerController.setDjDeckTempos(temposRef.current[0], temposRef.current[1]);
+      djTempo.reapplyTempos();
     });
-  }, [deckB, playerController]);
+  }, [deckB, playerController, djTempo.reapplyTempos]);
 
   // Mixxx-derived crossfade curve (see xfadeGains above), then each deck's own trim knob on
   // top. Trim is a client-side gain multiplier — the native engine only exposes one volume per
@@ -1412,7 +1115,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
       void playerController.playCuedTrack(deckB, volumeB).then((started) => {
         if (!started) return;
         setDeckBPlaying(true);
-        setDeckBStartedAt(startedAtFor(deckBPosition));
+        setDeckBStartedAt(djTempo.startedAtFor(deckBPosition));
       }).finally(() => {
         deckBStartingRef.current = false;
       });
@@ -1484,7 +1187,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     const started = await playerController.playCuedTrack(deckB, volumeB);
     if (started) {
       setDeckBPlaying(true);
-      setDeckBStartedAt(startedAtFor(deckBPosition));
+      setDeckBStartedAt(djTempo.startedAtFor(deckBPosition));
     }
   };
 
@@ -1517,6 +1220,33 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
     if (track.id === deckAIdRef.current) return;
     selectDeckB(track);
   }, [selectDeckB]);
+
+  /**
+   * "Add music from my PC": the OS file dialog picks audio files (or folders), the Rust scanner
+   * reads their tags — the same `local_audio_scan` the local playlists use, which is Mixxx's
+   * library-import step — and the resulting local tracks go straight onto the queue this panel
+   * shows, ready to load on a deck with A / B or drag there.
+   */
+  const handleAddLocalFiles = useCallback(async () => {
+    const selected = await openDialog({
+      title: "Add music from your PC",
+      multiple: true,
+      directory: false,
+      filters: [
+        {
+          name: "Audio files",
+          // Mirrors `is_local_audio_file` on the Rust side.
+          extensions: ["mp3", "m4a", "mp4", "aac", "flac", "wav", "ogg", "oga", "opus", "webm"],
+        },
+      ],
+    });
+    if (!selected) return;
+    const paths = Array.isArray(selected) ? selected : [selected];
+    if (!paths.length) return;
+    const tracks = await scanLocalAudioPaths(paths);
+    if (!tracks.length) return;
+    playerController.addTracksToQueue(tracks);
+  }, [playerController]);
 
   /**
    * The headline DJ move: hand playback from the active deck straight to the cued Deck B over
@@ -1598,9 +1328,9 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             onTrim={(value) => applyTrim("A", value)}
             hotCues={hotCuesA}
             dragState={dragTarget}
-            grid={gridFor(waveformA, bpmA)}
-            tempo={tempoView("A")}
-            tempoActions={tempoActions("A")}
+            grid={djTempo.gridFor(waveformA, djTempo.bpmA)}
+            tempo={djTempo.tempoView("A")}
+            tempoActions={djTempo.tempoActions("A")}
           />
           <Deck
             side="B"
@@ -1618,13 +1348,13 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
               const time = hotCuesB[0] ?? 0;
               setDeckBPosition(time);
               void playerController.seekCuedTrack(deckB, time);
-              if (deckBPlaying) setDeckBStartedAt(startedAtFor(time));
+              if (deckBPlaying) setDeckBStartedAt(djTempo.startedAtFor(time));
             }}
             onSeek={(value) => {
               setDeckBPosition(value);
               if (deckB) {
                 void playerController.seekCuedTrack(deckB, value);
-                if (deckBPlaying) setDeckBStartedAt(startedAtFor(value));
+                if (deckBPlaying) setDeckBStartedAt(djTempo.startedAtFor(value));
                 const [volumeA, volumeB] = deckVolumes(crossfader / 100);
                 setDeckMixVolumes([volumeA, volumeB]);
                 void playerController.setDjDeckVolumes(volumeA, volumeB);
@@ -1634,9 +1364,9 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             onTrim={(value) => applyTrim("B", value)}
             hotCues={hotCuesB}
             dragState={dragTarget}
-            grid={gridFor(waveformB, bpmB)}
-            tempo={tempoView("B")}
-            tempoActions={tempoActions("B")}
+            grid={djTempo.gridFor(waveformB, djTempo.bpmB)}
+            tempo={djTempo.tempoView("B")}
+            tempoActions={djTempo.tempoActions("B")}
           />
         </div>
 
@@ -1716,6 +1446,7 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             onLoadA={loadOnDeckA}
             onLoadB={loadOnDeckB}
             onDragTarget={setDragTarget}
+            onAddLocalFiles={handleAddLocalFiles}
           />
         </div>
       </div>

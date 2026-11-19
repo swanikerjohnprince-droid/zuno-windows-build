@@ -32,6 +32,9 @@ const BrowsePage = lazy(() =>
 const HistoryPage = lazy(() =>
   import("./pages/HistoryPage").then((m) => ({ default: m.HistoryPage })),
 );
+const FilesPage = lazy(() =>
+  import("./pages/FilesPage").then((m) => ({ default: m.FilesPage })),
+);
 const SettingsPage = lazy(() =>
   import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
 const LyricsView = lazy(() => import("./pages/LyricsView").then((m) => ({ default: m.LyricsView })));
@@ -72,6 +75,7 @@ import { AppLoadingScreen } from "./components/AppLoadingScreen";
 import { AuthOverlay } from "./components/AuthOverlay";
 import { UpdateToast } from "./components/UpdateToast";
 import { ReleaseNoteDialog } from "./components/ReleaseNoteDialog";
+import { NewTabPicker, type NewTabKind } from "./components/NewTabPicker";
 import { markReleaseNoteSeen, resolveReleaseNoteVersion } from "../internal/releaseNote";
 import {
   checkForUpdates,
@@ -212,6 +216,8 @@ function getNavigationKey(state: TabViewState): string {
       return "browse";
     case "library":
       return "library";
+    case "files":
+      return "files";
   }
 }
 
@@ -1103,7 +1109,36 @@ export default function App() {
     }
   };
 
-  const handleCreateTab = () => createTab();
+  /*
+   * The "+" button does not create a tab straight away anymore: it asks what kind of tab to
+   * open — a YouTube Music tab (the classic home tab) or a file manager tab for local audio.
+   */
+  const [newTabPickerOpen, setNewTabPickerOpen] = useState(false);
+
+  const handleCreateTab = () => setNewTabPickerOpen(true);
+
+  /* Reuses an open Files tab the way Library/History do — it is a single destination, not
+     something you want three copies of. Like those, it gets no TabManager entry: there is no
+     player behind it, just the local file list. */
+  const createFilesTab = () => {
+    playerUIStore.setLyricsOpen(false);
+    const filesTab = tabs.find((tab) => tab.view === "files");
+    if (filesTab) {
+      setActiveTabId(filesTab.id);
+      return;
+    }
+
+    const newId = nextTabId.toString();
+    setTabs((prevTabs) => [...prevTabs, { id: newId, view: "files", title: "Files" }]);
+    setActiveTabId(newId);
+    setNextTabId((currentId) => currentId + 1);
+  };
+
+  const handlePickNewTab = (kind: NewTabKind) => {
+    setNewTabPickerOpen(false);
+    if (kind === "files") createFilesTab();
+    else createTab();
+  };
 
   const handleSignIn = async () => {
     await libraryController.signIn();
@@ -2237,6 +2272,9 @@ useEffect(() => {
                 onOpenPlaylist={handleNavigatePlaylist}
               />
             )}
+            {activeTab?.view === "files" && (
+              <FilesPage playerController={playerController} />
+            )}
             {activeTab?.view === "browse" && (
               <BrowsePage
                 key={activeTab.browseTab ?? "explore"}
@@ -2362,6 +2400,11 @@ useEffect(() => {
           if (releaseNoteVersion) markReleaseNoteSeen(releaseNoteVersion);
           setReleaseNoteVersion(null);
         }}
+      />
+      <NewTabPicker
+        open={newTabPickerOpen}
+        onPick={handlePickNewTab}
+        onClose={() => setNewTabPickerOpen(false)}
       />
       {/*
         Mounted only while a sign-in is running: `signInProgress` is null at every other moment,

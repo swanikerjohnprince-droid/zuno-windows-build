@@ -1,0 +1,5 @@
+# windows-gnu toolchain: the MSVC link path is broken on this machine (no VS/MSVC),
+# the gnu path links via /c/gnu-shim/ldwrap.exe + rust-lld (see .cargo/config.toml).
+# UNCOMMITTED local workaround — delete to go back to the default toolchain.
+[toolchain]
+channel = "stable-x86_64-pc-windows-gnu"

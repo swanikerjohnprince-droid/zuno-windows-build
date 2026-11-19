@@ -464,6 +464,40 @@ function localTrackId(path: string): string {
   return `local:${btoa(unescape(encodeURIComponent(path)))}`;
 }
 
+/**
+ * Maps one scanned local file to a playable `Track`.
+ *
+ * Shared by local playlists and anything else that picks local files (the DJ queue's
+ * "add from PC"), so the id scheme and artwork prefix live in exactly one place.
+ */
+export function localAudioFileToTrack(file: LocalAudioFile): Track {
+  return {
+    id: localTrackId(file.path),
+    source: "local",
+    title: file.title,
+    // The literal string "Local files" used to sit here for every track, tags or not.
+    artist: file.artist ?? "Unknown artist",
+    album: file.album,
+    durationSec: file.durationSec,
+    artworkUrl: file.hasArtwork ? `${LOCAL_ARTWORK_PREFIX}${file.path}` : undefined,
+    playlistItemId: file.path,
+    localPath: file.path,
+  };
+}
+
+/**
+ * Scans user-picked local files or folders and returns them as playable tracks.
+ *
+ * This is the Mixxx "import local files" step (library scanner → track collection): the Rust
+ * `local_audio_scan` accepts plain file paths as well as folders, so a multi-select from the
+ * OS file dialog works directly — no intermediate library needed.
+ */
+export async function scanLocalAudioPaths(paths: string[]): Promise<Track[]> {
+  if (!paths.length) return [];
+  const files = await invoke<LocalAudioFile[]>("local_audio_scan", { paths });
+  return files.map(localAudioFileToTrack);
+}
+
 export function isLocalPlaylist(playlist: Playlist): boolean {
   return playlist.kind === "local" || playlist.id.startsWith(LOCAL_PLAYLIST_PREFIX);
 }
@@ -552,18 +586,7 @@ export async function getLocalPlaylistTrackPage(playlist: Playlist): Promise<Tra
   const excluded = new Set(stored?.excludedPaths ?? []);
   const scannedTracks: Track[] = files
     .filter((file) => !excluded.has(file.path))
-    .map((file): Track => ({
-      id: localTrackId(file.path),
-      source: "local",
-      title: file.title,
-      // The literal string "Local files" used to sit here for every track, tags or not.
-      artist: file.artist ?? "Unknown artist",
-      album: file.album,
-      durationSec: file.durationSec,
-      artworkUrl: file.hasArtwork ? `${LOCAL_ARTWORK_PREFIX}${file.path}` : undefined,
-      playlistItemId: file.path,
-      localPath: file.path,
-    }));
+    .map(localAudioFileToTrack);
 
   // Apply saved track order if it exists
   const order = readTrackOrder();
