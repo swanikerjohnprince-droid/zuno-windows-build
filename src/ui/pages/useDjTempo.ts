@@ -11,6 +11,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
 import type { Track } from "../../datasource/types";
+import { logInternalError } from "../../internal/logging";
 import type { PlayerControllerActions } from "../../player/playerStore";
 import type { TrackAnalysis } from "../../player/rustAudio";
 import {
@@ -220,7 +221,14 @@ export function useDjTempo({
 
   // The single path that sends the faders to the engine.
   const reapplyTempos = useCallback(() => {
-    void playerController.setDjDeckTempos(temposRef.current[0], temposRef.current[1]);
+    void playerController.setDjDeckTempos(temposRef.current[0], temposRef.current[1]).catch((error: unknown) => {
+      /*
+       * A tempo that cannot be sent is a tempo the DJ believes is applied and is not. Swallowing
+       * the rejection leaves the fader looking set while the track plays at its own speed, which
+       * is the one failure a DJ cannot see for themselves.
+       */
+      logInternalError("useDjTempo could not set the deck tempos", error);
+    });
   }, [playerController]);
 
   // Tell the engine on every change that can matter. Also when a deck starts playing: that is

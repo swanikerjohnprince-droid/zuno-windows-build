@@ -217,6 +217,44 @@ function loadYouTubeIframeApi(): Promise<void> {
   return iframeApiPromise;
 }
 
+/** The speeds a deck may run at. The Rust engine clamps to the same range. */
+export const MIN_DECK_SPEED = 0.25;
+export const MAX_DECK_SPEED = 4;
+
+/**
+ * The speed a deck plays at: the global rate with the deck's own fader on top of it.
+ *
+ * The same product the Rust engine computes — `rate * tempo`, clamped — so a track does not
+ * change speed when the engine it happens to be playing on changes.
+ */
+export function deckSpeed(globalRate: number, tempo: number): number {
+  return Math.min(MAX_DECK_SPEED, Math.max(MIN_DECK_SPEED, globalRate * tempo));
+}
+
+/** Which deck a tempo change has to be sent to. */
+export type DeckTempoTarget = "rust" | "native" | "iframe";
+
+/**
+ * Which decks a tempo change has to reach, given what is actually loaded.
+ *
+ * The setting says which pipeline is preferred; it does not say what is making sound right now.
+ * A streamed track Rust refused plays on the YouTube IFrame deck instead, and the `<audio>` and
+ * IFrame decks have a speed of their own but no fader of their own — so a tempo that only ever
+ * went to Rust would be a number on a slider and nothing else.
+ */
+export function deckTempoTargets(loaded: {
+  rustActive: boolean;
+  rustStandby: boolean;
+  native: boolean;
+  iframe: boolean;
+}): DeckTempoTarget[] {
+  const targets: DeckTempoTarget[] = [];
+  if (loaded.rustActive || loaded.rustStandby) targets.push("rust");
+  if (loaded.native) targets.push("native");
+  if (loaded.iframe) targets.push("iframe");
+  return targets;
+}
+
 export class AudioEngine {
   /*
    * A getter, not a field captured in the constructor: engines are built once per tab and live
@@ -239,6 +277,15 @@ export class AudioEngine {
   private djDeckActive = false;
   private rustDurationSec = 0;
   private rustStandbyDurationSec = 0;
+  /**
+   * The DJ pitch faders, as multipliers on each deck's own speed: 1 is the track's own tempo.
+   *
+   * The engine keeps them so a deck that lands a track after the fader was set can be put back
+   * where the fader says it is. Rust starts a freshly loaded deck at 1.0, and the `<audio>` and
+   * YouTube decks have no notion of a fader of their own — without this the fader is a number on
+   * screen that nothing plays at.
+   */
+  private deckTempos: [number, number] = [1, 1];
   /**
    * This track is on the IFrame deck even though the selected engine is not `iframe`.
    *
@@ -394,6 +441,8 @@ export class AudioEngine {
       throw error;
     }
     if (requestId !== this.loadRequestId || this.currentVideoId !== videoId) return;
+    // The player starts at 1 and the fader is the only thing that knows otherwise.
+    player.setPlaybackRate?.(this.rateWithTempo(this.deckTempos[0]));
     logInternalInfo("AudioEngine.loadTrack cued", { videoId });
   }
 
@@ -865,6 +914,12 @@ export class AudioEngine {
     routeRustEnded();
     this.rustStandbyDurationSec = await rustAudio.load(trackId, source, durationSec, true);
     this.rustStandbyTrackId = trackId;
+    // Same as the active deck: a deck that has just been given a track starts at 1.0.
+    await rustAudio
+      .setDeckTempos(this.deckTempos[0], this.deckTempos[1])
+      .catch((error: unknown) => {
+        rustAudio.warn("AudioEngine rust standby tempo re-apply failed", error);
+      });
     logInternalInfo("AudioEngine rust preloaded", { trackId });
   }
 
@@ -900,16 +955,43 @@ export class AudioEngine {
     );
   }
 
+  /** The speed a deck plays at: the global rate with the deck's own fader on top of it. */
+  private rateWithTempo(tempo: number): number {
+    return deckSpeed(this.playbackRate, tempo);
+  }
+
   /**
    * Sets the active and standby deck tempos independently for the DJ pitch faders. Multipliers on
    * each track's own speed, so 1.05 is +5%. Pitch moves with speed, as on a turntable.
+   *
+   * Every deck that is loaded is told, not just the Rust one. The `<audio>` element and the
+   * YouTube players have a speed of their own but no notion of a fader, so for them the fader is
+   * folded into the speed they are given. A deck with nothing on it is left alone and picks the
+   * fader up when its track lands.
    */
   async setDeckTempos(activeTempo: number, standbyTempo: number): Promise<void> {
-    if (!this.useRustAudio) return;
-    await rustAudio.setDeckTempos(
-      Math.max(0.5, Math.min(2, activeTempo)),
-      Math.max(0.5, Math.min(2, standbyTempo)),
-    );
+    const active = Math.max(0.5, Math.min(2, activeTempo));
+    const standby = Math.max(0.5, Math.min(2, standbyTempo));
+    this.deckTempos = [active, standby];
+
+    const targets = deckTempoTargets({
+      rustActive: this.rustTrackId !== null,
+      rustStandby: this.rustStandbyTrackId !== null,
+      native: this.audio !== null,
+      iframe: this.player !== null,
+    });
+
+    if (targets.includes("rust")) {
+      await rustAudio.setDeckTempos(active, standby);
+    }
+    if (targets.includes("native")) {
+      // The element is the only deck the native engine has, and it is the active one.
+      this.applyNativeAudioSettings();
+    }
+    if (targets.includes("iframe")) {
+      this.player?.setPlaybackRate?.(this.rateWithTempo(active));
+    }
+    this.standbyPlayer?.setPlaybackRate?.(this.rateWithTempo(standby));
   }
 
   /** Whether a transition to `videoId` can skip loading entirely. */
@@ -949,6 +1031,8 @@ export class AudioEngine {
       this.rustStandbyDurationSec = 0;
       this.currentVideoId = videoId;
       this.loadRequestId += 1;
+      // Rust promoted the standby deck, so the faders move with it.
+      this.deckTempos = [this.deckTempos[1], this.deckTempos[0]];
       rustAudio.adoptTransitioned(videoId, this.rustDurationSec);
       logInternalInfo("AudioEngine.transitionToPreloaded rust", { videoId, fadeMs });
       return true;
@@ -966,7 +1050,8 @@ export class AudioEngine {
     } else {
       incoming.unMute();
     }
-    incoming.setPlaybackRate?.(this.playbackRate);
+    // The incoming deck is the standby one, so the standby's fader is what it plays at.
+    incoming.setPlaybackRate?.(this.rateWithTempo(this.deckTempos[1]));
     incoming.playVideo();
 
     // Swap the decks first: everything else on the engine addresses `this.player`, and the
@@ -979,6 +1064,9 @@ export class AudioEngine {
     this.standbyVideoId = null;
     this.currentVideoId = videoId;
     this.loadRequestId += 1;
+    // The decks swapped places, so the faders do too: what the standby was playing at is now
+    // the active deck's, and what the active deck was playing at is the standby's.
+    this.deckTempos = [this.deckTempos[1], this.deckTempos[0]];
 
     if (fadeMs > 0) {
       await this.rampAcross(outgoing, incoming, targetPercent, fadeMs);
@@ -1033,6 +1121,8 @@ export class AudioEngine {
 
     this.standbyPlayer.cueVideoById(videoId);
     this.standbyVideoId = videoId;
+    // The standby deck has a fader of its own; the player has no idea what it is.
+    this.standbyPlayer.setPlaybackRate?.(this.rateWithTempo(this.deckTempos[1]));
     logInternalInfo("AudioEngine.preloadNext cued", { videoId });
   }
 
@@ -1142,6 +1232,16 @@ export class AudioEngine {
     this.currentVideoId = videoId;
     await rustAudio.setVolume(this.volume, this.muted);
     await rustAudio.setRate(this.playbackRate);
+    /*
+     * Rust starts a freshly loaded deck at its own speed, so the fader has to be re-sent: the
+     * one the DJ set before this track landed was thrown away with the deck it was on. Without
+     * this the track arrives at the right tempo and quietly leaves it.
+     */
+    await rustAudio
+      .setDeckTempos(this.deckTempos[0], this.deckTempos[1])
+      .catch((error: unknown) => {
+        rustAudio.warn("AudioEngine rust tempo re-apply failed", error);
+      });
     logInternalInfo("AudioEngine rust audio loaded", {
       videoId,
       kind: source.kind,
@@ -1268,7 +1368,12 @@ export class AudioEngine {
     if (!this.audio) return;
     this.audio.volume = this.muted ? 0 : this.volume;
     this.audio.muted = this.muted;
-    this.audio.playbackRate = this.playbackRate;
+    /*
+     * The element's rate is the whole speed of the track — there is no separate fader on it — so
+     * the active deck's fader rides on top of the global rate here. Writing the bare global rate
+     * instead would wipe the fader every time the speed or the volume changed.
+     */
+    this.audio.playbackRate = this.rateWithTempo(this.deckTempos[0]);
     /*
      * Pitch correction on. Without it a speed change transposes the music, which is fine for
      * a podcast and unacceptable for a song. The property is prefixed on WebKit and absent in
@@ -1291,7 +1396,9 @@ export class AudioEngine {
       });
     }
     this.applyNativeAudioSettings();
-    this.player?.setPlaybackRate?.(this.playbackRate);
+    // The YouTube players carry no fader either, so they are given the whole speed of their deck.
+    this.player?.setPlaybackRate?.(this.rateWithTempo(this.deckTempos[0]));
+    this.standbyPlayer?.setPlaybackRate?.(this.rateWithTempo(this.deckTempos[1]));
   }
 
   getPlaybackRate(): number {

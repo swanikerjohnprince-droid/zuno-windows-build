@@ -18,7 +18,7 @@ import { useDjTempo, type DeckTempoActions, type DeckTempoView, type WaveformSta
 import { Marquee } from "@/components/motion/marquee";
 import { PlayIcon, PauseIcon, MusicNoteIcon, ArrowRightIcon } from "@/ui/icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { LOCAL_AUDIO_SCAN_AVAILABLE, scanLocalAudioPaths } from "../../player/localPlaylists";
+import { scanLocalAudioPaths } from "../../player/localPlaylists";
 
 /** Bounds for the operator-adjustable "MIX A → B" transition length, in seconds. */
 const MIN_TRANSITION_SEC = 1;
@@ -857,13 +857,8 @@ const DjQueue = memo(function DjQueue({
           <button
             type="button"
             onClick={onAddLocalFiles}
-            disabled={!LOCAL_AUDIO_SCAN_AVAILABLE}
-            title={
-              LOCAL_AUDIO_SCAN_AVAILABLE
-                ? "Pick audio files from your PC and add them to the queue"
-                : "Adding files from your PC is not available yet"
-            }
-            className="rounded-full bg-primary px-2.5 py-1 text-[9px] font-bold tracking-wider text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-primary"
+            title="Pick audio files from your PC and add them to the queue"
+            className="rounded-full bg-primary px-2.5 py-1 text-[9px] font-bold tracking-wider text-primary-foreground transition-colors hover:bg-primary/90"
           >
             + ADD FROM PC
           </button>
@@ -1231,13 +1226,8 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
    * reads their tags — the same `local_audio_scan` the local playlists use, which is Mixxx's
    * library-import step — and the resulting local tracks go straight onto the queue this panel
    * shows, ready to load on a deck with A / B or drag there.
-   *
-   * The scanner that backs this is still unfinished, so `LOCAL_AUDIO_SCAN_AVAILABLE` is off and
-   * the button is disabled. The call is kept here, wired and ready, so turning the flag on is
-   * the only change needed once the scanner lands — the placeholder it calls returns nothing.
    */
   const handleAddLocalFiles = useCallback(async () => {
-    if (!LOCAL_AUDIO_SCAN_AVAILABLE) return;
     const selected = await openDialog({
       title: "Add music from your PC",
       multiple: true,

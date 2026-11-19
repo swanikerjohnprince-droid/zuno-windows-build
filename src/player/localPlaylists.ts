@@ -464,6 +464,40 @@ function localTrackId(path: string): string {
   return `local:${btoa(unescape(encodeURIComponent(path)))}`;
 }
 
+/**
+ * Maps one scanned local file to a playable `Track`.
+ *
+ * Shared by local playlists and anything else that picks local files (the DJ queue's
+ * "add from PC"), so the id scheme and artwork prefix live in exactly one place.
+ */
+export function localAudioFileToTrack(file: LocalAudioFile): Track {
+  return {
+    id: localTrackId(file.path),
+    source: "local",
+    title: file.title,
+    // The literal string "Local files" used to sit here for every track, tags or not.
+    artist: file.artist ?? "Unknown artist",
+    album: file.album,
+    durationSec: file.durationSec,
+    artworkUrl: file.hasArtwork ? `${LOCAL_ARTWORK_PREFIX}${file.path}` : undefined,
+    playlistItemId: file.path,
+    localPath: file.path,
+  };
+}
+
+/**
+ * Scans user-picked local files or folders and returns them as playable tracks.
+ *
+ * This is the Mixxx "import local files" step (library scanner → track collection): the Rust
+ * `local_audio_scan` accepts plain file paths as well as folders, so a multi-select from the
+ * OS file dialog works directly — no intermediate library needed.
+ */
+export async function scanLocalAudioPaths(paths: string[]): Promise<Track[]> {
+  if (!paths.length) return [];
+  const files = await invoke<LocalAudioFile[]>("local_audio_scan", { paths });
+  return files.map(localAudioFileToTrack);
+}
+
 export function isLocalPlaylist(playlist: Playlist): boolean {
   return playlist.kind === "local" || playlist.id.startsWith(LOCAL_PLAYLIST_PREFIX);
 }
@@ -552,18 +586,7 @@ export async function getLocalPlaylistTrackPage(playlist: Playlist): Promise<Tra
   const excluded = new Set(stored?.excludedPaths ?? []);
   const scannedTracks: Track[] = files
     .filter((file) => !excluded.has(file.path))
-    .map((file): Track => ({
-      id: localTrackId(file.path),
-      source: "local",
-      title: file.title,
-      // The literal string "Local files" used to sit here for every track, tags or not.
-      artist: file.artist ?? "Unknown artist",
-      album: file.album,
-      durationSec: file.durationSec,
-      artworkUrl: file.hasArtwork ? `${LOCAL_ARTWORK_PREFIX}${file.path}` : undefined,
-      playlistItemId: file.path,
-      localPath: file.path,
-    }));
+    .map(localAudioFileToTrack);
 
   // Apply saved track order if it exists
   const order = readTrackOrder();
@@ -601,25 +624,3 @@ export async function getLocalPlaylistTrackPage(playlist: Playlist): Promise<Tra
   return { tracks: scannedTracks, hasMore: false };
 }
 
-/**
- * Whether the ad-hoc "add music from my PC" scanner is usable yet.
- *
- * It is not. DJ Mode can pick individual audio files off the user's disk and put them on the
- * queue, but the Rust-side scan it needs (`local_audio_scan`) only ever ran over a whole local
- * playlist — what a hand-picked handful of files should look like, with their artwork,
- * duration and playlist identity, is still an open question. Shipping a half-built scanner
- * would be worse than parking the feature, so it stays switched off until that is settled.
- */
-export const LOCAL_AUDIO_SCAN_AVAILABLE = false;
-
-/**
- * Placeholder for the unfinished scanner. Deliberately does no work.
- *
- * The DJ Mode import stays valid so the app compiles, and `LOCAL_AUDIO_SCAN_AVAILABLE` keeps
- * the button that calls this disabled, so nothing reaches this and quietly adds no tracks.
- *
- * @see LOCAL_AUDIO_SCAN_AVAILABLE
- */
-export async function scanLocalAudioPaths(_paths: string[]): Promise<Track[]> {
-  return [];
-}

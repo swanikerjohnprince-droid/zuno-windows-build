@@ -20,7 +20,8 @@
         "width": 1280,
         "height": 900,
         "minWidth": 900,
-        "minHeight": 600
+        "minHeight": 600,
+        "additionalBrowserArgs": "--remote-debugging-port=9222 --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required"
       }
     ],
     "security": {
