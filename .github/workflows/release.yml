@@ -32,10 +32,6 @@ jobs:
       - name: Install frontend dependencies
         run: npm install --no-audit --no-fund
 
-      # Keep the JavaScript Tauri packages aligned with the Rust crates resolved by Cargo.lock.
-      - name: Align Tauri JavaScript package versions
-        run: npm update @tauri-apps/api @tauri-apps/cli @tauri-apps/plugin-autostart @tauri-apps/plugin-dialog @tauri-apps/plugin-opener @tauri-apps/plugin-process @tauri-apps/plugin-updater --no-audit --no-fund
-
       - name: Build Zuno
         run: npm run tauri build -- --bundles nsis
 
@@ -105,10 +101,6 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm install --no-audit --no-fund
-
-      # Keep the JavaScript Tauri packages aligned with the Rust crates resolved by Cargo.lock.
-      - name: Align Tauri JavaScript package versions
-        run: npm update @tauri-apps/api @tauri-apps/cli @tauri-apps/plugin-autostart @tauri-apps/plugin-dialog @tauri-apps/plugin-opener @tauri-apps/plugin-process @tauri-apps/plugin-updater --no-audit --no-fund
 
       - name: Initialize Tauri Android project
         run: npm run tauri android init
