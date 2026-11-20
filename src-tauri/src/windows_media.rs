@@ -362,7 +362,9 @@ impl ThumbnailToolbar {
         let window = app
             .get_webview_window("main")
             .ok_or_else(|| "main window unavailable".to_string())?;
-        let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+        // tauri's `hwnd()` hands back the `windows` 0.61 `HWND` (via tao) while this crate
+        // uses 0.62; both are a newtype over the same raw pointer, so re-wrap it.
+        let hwnd = HWND(window.hwnd().map_err(|error| error.to_string())?.0);
 
         initialize_com_for_taskbar()?;
         let taskbar: ITaskbarList3 =
