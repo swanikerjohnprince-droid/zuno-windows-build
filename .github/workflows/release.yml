@@ -27,11 +27,12 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # npm install repairs optional bundled dependency entries missing from the lockfile
+      # before resolving and installing the frontend packages on the runner.
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       # Keep the JavaScript Tauri packages aligned with the Rust crates resolved by Cargo.lock.
-      # npm ci installs the committed lockfile; update only the Tauri packages before building.
       - name: Align Tauri JavaScript package versions
         run: npm update @tauri-apps/api @tauri-apps/cli @tauri-apps/plugin-autostart @tauri-apps/plugin-dialog @tauri-apps/plugin-opener @tauri-apps/plugin-process @tauri-apps/plugin-updater --no-audit --no-fund
 
@@ -103,10 +104,9 @@ jobs:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       # Keep the JavaScript Tauri packages aligned with the Rust crates resolved by Cargo.lock.
-      # npm ci installs the committed lockfile; update only the Tauri packages before building.
       - name: Align Tauri JavaScript package versions
         run: npm update @tauri-apps/api @tauri-apps/cli @tauri-apps/plugin-autostart @tauri-apps/plugin-dialog @tauri-apps/plugin-opener @tauri-apps/plugin-process @tauri-apps/plugin-updater --no-audit --no-fund
 
@@ -150,15 +150,15 @@ jobs:
             KEYSTORE_PASSWORD="zunothrowaway"
             KEY_ALIAS="zuno"
             KEY_PASSWORD="$KEYSTORE_PASSWORD"
-            keytool -genkeypair -keystore "$KEYSTORE" -storepass "$KEYSTORE_PASSWORD" \
-              -alias "$KEY_ALIAS" -keypass "$KEY_PASSWORD" -keyalg RSA -keysize 2048 \
+            keytool -genkeypair -keystore "$KEYSTORE" -storepass "$KEYSTORE_PASSWORD" \\
+              -alias "$KEY_ALIAS" -keypass "$KEY_PASSWORD" -keyalg RSA -keysize 2048 \\
               -validity 10000 -dname "CN=Zuno DJ"
           fi
 
           mkdir -p signed
           "$BT/zipalign" -f -p 4 "$UNSIGNED" signed/aligned.apk
-          "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass "pass:$KEYSTORE_PASSWORD" \
-            --ks-key-alias "$KEY_ALIAS" --key-pass "pass:$KEY_PASSWORD" \
+          "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass "pass:$KEYSTORE_PASSWORD" \\
+            --ks-key-alias "$KEY_ALIAS" --key-pass "pass:$KEY_PASSWORD" \\
             --out signed/Zuno-DJ-Android.apk signed/aligned.apk
           rm signed/aligned.apk
           "$BT/apksigner" verify --print-certs signed/Zuno-DJ-Android.apk

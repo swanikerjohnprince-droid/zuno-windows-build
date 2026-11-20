@@ -12,11 +12,9 @@ edition = "2021"
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "zuno_lib"
-# NOTE(gnu-shim): "cdylib" removed for the windows-gnu dev toolchain on this machine:
-# rustc exports every symbol for a gnu cdylib, and lld caps PE exports at 65535
-# ("too many exported symbols (got 172985)"). Desktop dev only needs the bin + rlib.
-# Restore "cdylib" for MSVC/mobile release builds.
-crate-type = ["staticlib", "rlib"]
+# Tauri desktop and mobile builds need the cdylib output; staticlib and rlib
+# remain enabled for the native test and link paths.
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -84,4 +82,3 @@ windows = { version = "0.62.2", features = [
 
 [target.'cfg(target_os = "linux")'.dependencies]
 souvlaki = "0.9"
-
