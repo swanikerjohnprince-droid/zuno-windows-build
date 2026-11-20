@@ -150,15 +150,15 @@ jobs:
             KEYSTORE_PASSWORD="zunothrowaway"
             KEY_ALIAS="zuno"
             KEY_PASSWORD="$KEYSTORE_PASSWORD"
-            keytool -genkeypair -keystore "$KEYSTORE" -storepass "$KEYSTORE_PASSWORD" \\
-              -alias "$KEY_ALIAS" -keypass "$KEY_PASSWORD" -keyalg RSA -keysize 2048 \\
+            keytool -genkeypair -keystore "$KEYSTORE" -storepass "$KEYSTORE_PASSWORD" \
+              -alias "$KEY_ALIAS" -keypass "$KEY_PASSWORD" -keyalg RSA -keysize 2048 \
               -validity 10000 -dname "CN=Zuno DJ"
           fi
 
           mkdir -p signed
           "$BT/zipalign" -f -p 4 "$UNSIGNED" signed/aligned.apk
-          "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass "pass:$KEYSTORE_PASSWORD" \\
-            --ks-key-alias "$KEY_ALIAS" --key-pass "pass:$KEY_PASSWORD" \\
+          "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass "pass:$KEYSTORE_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" --key-pass "pass:$KEY_PASSWORD" \
             --out signed/Zuno-DJ-Android.apk signed/aligned.apk
           rm signed/aligned.apk
           "$BT/apksigner" verify --print-certs signed/Zuno-DJ-Android.apk
