@@ -328,7 +328,7 @@ export function Layout({
                       The scroller moves down a level so the search bar above it stays put while
                       the page scrolls, the way it does in the unsplit layout.
                     */}
-                    <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-hidden rounded-xl">
+                    <section data-split-browse className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-hidden rounded-xl">
                       {searchBar}
                       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain rounded-xl">
                         {children}
@@ -341,7 +341,7 @@ export function Layout({
                         splitOrientation === "vertical" ? "w-px" : "h-px",
                       )}
                     />
-                    <section className="min-h-0 min-w-0 flex-1 overflow-hidden rounded-xl bg-card/30">
+                    <section data-split-panel className="min-h-0 min-w-0 flex-1 overflow-hidden rounded-xl bg-card/30">
                       {splitPanel}
                     </section>
                   </div>

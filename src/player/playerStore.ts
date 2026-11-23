@@ -4,6 +4,7 @@ import type { Track } from "../datasource/types";
 import { LibraryController } from "./LibraryController";
 import { PlayerController, type PlayerSession, type PlayerState } from "./PlayerController";
 import { SearchController } from "./SearchController";
+import { initLocalSearchIndex, searchLocalTracks } from "./localSearch";
 import { TabManager } from "./TabManager";
 import { loadAppSession } from "./appSession";
 import { readSessionRestoreEnabled } from "../ui/settings/sessionRestore";
@@ -16,7 +17,8 @@ import {
 const dataSource = new YouTubeMusicDataSource();
 
 export const libraryController = new LibraryController(dataSource);
-export const searchController = new SearchController(dataSource);
+initLocalSearchIndex();
+export const searchController = new SearchController(dataSource, searchLocalTracks);
 /*
  * The offline queue needs a stream URL but must not depend on any particular data source, so
  * the source is injected here where both are already in scope.

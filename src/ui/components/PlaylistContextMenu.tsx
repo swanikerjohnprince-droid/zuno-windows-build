@@ -21,6 +21,7 @@ import {
   PlaylistContext,
   type PlaylistContextMenuValue,
 } from "./playlistContextMenuContext";
+import { clampPopupPosition, popupToastStyle, usePopupBounds } from "../popupBounds";
 
 /* Re-exported so existing `from "./PlaylistContextMenu"` imports keep working; the context
    itself has to live outside this file. See playlistContextMenuContext.ts. */
@@ -34,6 +35,7 @@ export function PlaylistContextMenuProvider({
   libraryController: LibraryController;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const popupBounds = usePopupBounds();
   const toastTimerRef = useRef<number | null>(null);
   const [playlist, setPlaylist] = useState<Playlist | null>(null);
   const [album, setAlbum] = useState<Album | null>(null);
@@ -90,19 +92,18 @@ export function PlaylistContextMenuProvider({
       const menu = menuRef.current;
       if (!menu) return;
 
-      const viewportMargin = 8;
       const bounds = menu.getBoundingClientRect();
-      const x = Math.max(
-        viewportMargin,
-        Math.min(position.x, window.innerWidth - bounds.width - viewportMargin),
-      );
-      const y = Math.max(
-        viewportMargin,
-        Math.min(position.y, window.innerHeight - bounds.height - viewportMargin),
+      // Clamped to the half the menu was opened in: in Split Mode that is the browse half
+      // (or the DJ panel, for a menu opened there), never across the divider.
+      const clamped = clampPopupPosition(
+        position.x,
+        position.y,
+        bounds.width,
+        bounds.height,
       );
 
-      if (x !== position.x || y !== position.y) {
-        setPosition({ x, y });
+      if (clamped.x !== position.x || clamped.y !== position.y) {
+        setPosition(clamped);
       }
     };
 
@@ -504,7 +505,7 @@ export function PlaylistContextMenuProvider({
         </div>
       )}
       {toast && (
-        <div className="fixed bottom-28 left-1/2 z-[60] flex -translate-x-1/2 items-center gap-2 rounded-full bg-popover/95 px-4 py-2 text-sm text-foreground shadow-2xl backdrop-blur" role="status">
+        <div className="fixed bottom-28 left-1/2 z-[60] flex -translate-x-1/2 items-center gap-2 rounded-full bg-popover/95 px-4 py-2 text-sm text-foreground shadow-2xl backdrop-blur" style={popupToastStyle(popupBounds)} role="status">
           {isSaving ? (
             <Loader variant="spinner" size={18} />
           ) : (toast.startsWith("Saved ") || toast.startsWith("Removed ") || toast === "Url copied to clipboard" || toast === "Local playlist deleted") && (

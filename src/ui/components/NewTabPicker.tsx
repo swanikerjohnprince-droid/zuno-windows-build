@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "motion/react";
 import { FolderIcon, HomeIcon } from "@/ui/icons";
+import { popupScrimStyle, usePopupBounds } from "../popupBounds";
 
 export type NewTabKind = "music" | "files";
 
@@ -28,6 +29,8 @@ export function NewTabPicker({ open, onPick, onClose }: NewTabPickerProps) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open, onClose]);
 
+  const popupBounds = usePopupBounds();
+
   const optionClass =
     "flex items-center gap-3 rounded-xl bg-card px-4 py-3 text-left ring-1 ring-border transition-colors hover:bg-card/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
@@ -38,6 +41,7 @@ export function NewTabPicker({ open, onPick, onClose }: NewTabPickerProps) {
           /* Rounded to the window: a square scrim over a rounded window paints past the
              corner cutout. The variable is 0 when maximized, so it follows the window. */
           className="fixed inset-0 z-[200] flex items-center justify-center overflow-hidden rounded-[var(--window-radius)] bg-background/70 p-6 backdrop-blur-sm"
+          style={popupScrimStyle(popupBounds)}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}

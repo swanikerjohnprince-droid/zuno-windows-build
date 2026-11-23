@@ -8,6 +8,7 @@ import type { Track } from "../../datasource/types";
 import { logInternalError } from "../../internal/logging";
 import { forgetArtworkSource } from "../../internal/artworkCache";
 import { LOCAL_ARTWORK_PREFIX } from "../../player/localPlaylists";
+import { popupScrimStyle, usePopupBounds } from "../popupBounds";
 
 export interface LocalAudioTags {
   title?: string;
@@ -80,6 +81,7 @@ export function TagEditor({
   const [saving, setSaving] = useState(false);
   const [pickingImage, setPickingImage] = useState(false);
   const firstFieldRef = useRef<HTMLInputElement>(null);
+  const popupBounds = usePopupBounds();
 
   useEffect(() => {
     let cancelled = false;
@@ -180,6 +182,7 @@ export function TagEditor({
   return (
     <div
       className="fixed inset-0 z-[70] grid place-items-center bg-background/70 p-6 backdrop-blur-sm"
+      style={popupScrimStyle(popupBounds)}
       role="dialog"
       aria-modal="true"
       aria-label={`Edit tags for ${track.title}`}

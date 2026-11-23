@@ -1,7 +1,7 @@
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { SpinnerSteps } from "@/components/motion/loader";
-import { PlayActiveIcon } from "@/ui/icons";
+import { FolderIcon, PlayActiveIcon } from "@/ui/icons";
 import type {
   Album,
   Artist,
@@ -168,6 +168,22 @@ export function SearchResultsPage({
     };
   }, [deepResults, results, scope]);
 
+  /*
+   * Local files ("Your files") get their own section above Songs in the "All" scope, so a
+   * match on disk is never buried under YouTube results — and each row carries the badge
+   * saying the file is on this machine.
+   */
+  const localTracks = useMemo(
+    () => scopedResults.tracks.filter((track) => track.source === "local"),
+    [scopedResults],
+  );
+  const remoteTracks = useMemo(
+    () => scopedResults.tracks.filter((track) => track.source !== "local"),
+    [scopedResults],
+  );
+  const showLocalSection = scope === "all" && localTracks.length > 0;
+  const songsTracks = showLocalSection ? remoteTracks : scopedResults.tracks;
+
   const availableScopes = useMemo(
     () => SCOPES.filter(
       (item) => item.value === "all" || results[item.field].length > 0,
@@ -308,6 +324,45 @@ export function SearchResultsPage({
     "--search-enter-delay": `${Math.min(Math.max(index, 0), 18) * 28}ms`,
   } as CSSProperties), []);
 
+  /* One row shape shared by the "From your files" section and Songs, so the local badge
+     and the context menu / keyboard selection behave identically in both. */
+  const renderTrackRow = (track: Track, displayIndex: number) => {
+    const index = flatItems.findIndex(
+      (item) => item.kind === "track" && item.track.id === track.id,
+    );
+    return (
+      <button
+        key={track.id}
+        type="button"
+        data-selectable-index={index}
+        className={`${"group/row flex w-full items-center gap-3 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"} ${"animate-in fade-in"} ${selected(index)}`}
+        style={enterStyle(index)}
+        onContextMenu={(event) => openTrackMenu(event, track)}
+        onClick={() => playTrack(track)}
+        onMouseEnter={() => handleMouseEnter(index)}
+      >
+        <span className="w-5 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{displayIndex + 1}</span>
+        <TrackArtwork
+          className="size-11 shrink-0 rounded-md object-cover"
+          size={44}
+          artworkUrl={track.artworkUrl}
+          iconSize={24}
+        />
+        <span className="flex min-w-0 flex-1 flex-col [&_span]:truncate [&_span]:text-xs [&_span]:text-muted-foreground [&_strong]:truncate [&_strong]:text-sm [&_strong]:font-medium">
+          <strong>{track.title}</strong>
+          <ArtistLinks artists={track.artists} fallback={track.artist} />
+        </span>
+        {track.source === "local" && (
+          <span className="flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+            <FolderIcon size={11} aria-hidden="true" />
+            Your files
+          </span>
+        )}
+        <PlayActiveIcon size={18} />
+      </button>
+    );
+  };
+
   return (
     <div className="flex flex-col gap-8">
       <header className="flex flex-col gap-3">
@@ -354,7 +409,7 @@ export function SearchResultsPage({
       ) : (
         <div className="flex flex-col gap-8">
           {scopedResults.artists.length > 0 && (
-            <section className="flex flex-col gap-3" style={{ order: songsFirst ? 1 : 0 }}>
+            <section className="flex flex-col gap-3" style={{ order: songsFirst ? 2 : 1 }}>
               <h2>Artists</h2>
               <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(9.5rem,1fr))]">
                 {scopedResults.artists.map((artist) => {
@@ -387,46 +442,29 @@ export function SearchResultsPage({
             </section>
           )}
 
-          {scopedResults.tracks.length > 0 && (
-            <section className="flex flex-col gap-3" style={{ order: songsFirst ? 0 : 1 }}>
+          {showLocalSection && (
+            <section className="flex flex-col gap-3" style={{ order: 0 }}>
+              <h2 className="flex items-center gap-2">
+                <FolderIcon size={16} aria-hidden="true" />
+                From your files
+              </h2>
+              <div className="flex flex-col gap-0.5">
+                {localTracks.map((track, displayIndex) => renderTrackRow(track, displayIndex))}
+              </div>
+            </section>
+          )}
+
+          {songsTracks.length > 0 && (
+            <section className="flex flex-col gap-3" style={{ order: songsFirst ? 1 : 2 }}>
               <h2>Songs</h2>
               <div className="flex flex-col gap-0.5" data-onboarding="search-results">
-                {scopedResults.tracks.map((track, displayIndex) => {
-                  const index = flatItems.findIndex(
-                    (item) => item.kind === "track" && item.track.id === track.id,
-                  );
-                  return (
-                    <button
-                      key={track.id}
-                      type="button"
-                      data-selectable-index={index}
-                      className={`${"group/row flex w-full items-center gap-3 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"} ${"animate-in fade-in"} ${selected(index)}`}
-                      style={enterStyle(index)}
-                      onContextMenu={(event) => openTrackMenu(event, track)}
-                      onClick={() => playTrack(track)}
-                      onMouseEnter={() => handleMouseEnter(index)}
-                    >
-                      <span className="w-5 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{displayIndex + 1}</span>
-                      <TrackArtwork
-                        className="size-11 shrink-0 rounded-md object-cover"
-                        size={44}
-                        artworkUrl={track.artworkUrl}
-                        iconSize={24}
-                      />
-                      <span className="flex min-w-0 flex-1 flex-col [&_span]:truncate [&_span]:text-xs [&_span]:text-muted-foreground [&_strong]:truncate [&_strong]:text-sm [&_strong]:font-medium">
-                        <strong>{track.title}</strong>
-                        <ArtistLinks artists={track.artists} fallback={track.artist} />
-                      </span>
-                      <PlayActiveIcon size={18} />
-                    </button>
-                  );
-                })}
+                {songsTracks.map((track, displayIndex) => renderTrackRow(track, displayIndex))}
               </div>
             </section>
           )}
 
           {scopedResults.albums.length > 0 && (
-            <section className="flex flex-col gap-3" style={{ order: 2 }}>
+            <section className="flex flex-col gap-3" style={{ order: 3 }}>
               <h2>Albums</h2>
               <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(9.5rem,1fr))]">
                 {scopedResults.albums.map((album) => {
@@ -458,7 +496,7 @@ export function SearchResultsPage({
           )}
 
           {scopedResults.playlists.length > 0 && (
-            <section className="flex flex-col gap-3" style={{ order: 3 }}>
+            <section className="flex flex-col gap-3" style={{ order: 4 }}>
               <h2>Playlists</h2>
               <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(9.5rem,1fr))]">
                 {scopedResults.playlists.map((playlist) => {

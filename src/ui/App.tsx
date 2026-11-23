@@ -56,6 +56,7 @@ import { useNativeWindowControls } from "./settings/windowControls";
 /** Wide enough for a 44px cover plus breathing room, matching the sidebar rail's feel. */
 const COLLAPSED_QUEUE_WIDTH = 62;
 import { Layout } from "./components/Layout";
+import { PopupBoundsContext, type PopupBounds } from "./popupBounds";
 import type { Tab, TabViewState } from "./types/tab";
 import {
   libraryController,
@@ -351,6 +352,54 @@ export default function App() {
     });
   }, []);
   const [splitOrientation, setSplitOrientation] = useState<"vertical" | "horizontal">("vertical");
+  /*
+   * Split Mode puts the DJ panel in one half of the window. Popups that belong to the browse
+   * half (search overlay, dialogs, toasts) read this rect and confine themselves to it, so
+   * they never paint over the decks. Measured off the DOM because the half's exact size depends
+   * on the sidebar, the orientation and the window — guessing it from state would drift.
+   */
+  const [popupBounds, setPopupBounds] = useState<PopupBounds | null>(null);
+  useEffect(() => {
+    const root = document.documentElement;
+    if (!isSplitMode) {
+      root.dataset.splitMode = "false";
+      setPopupBounds(null);
+      return;
+    }
+    root.dataset.splitMode = "true";
+    root.dataset.splitOrientation = splitOrientation;
+    const measure = () => {
+      const browse = document.querySelector<HTMLElement>("[data-split-browse]");
+      if (!browse) {
+        setPopupBounds(null);
+        return;
+      }
+      const rect = browse.getBoundingClientRect();
+      setPopupBounds((current) =>
+        current
+        && current.top === rect.top
+        && current.left === rect.left
+        && current.width === rect.width
+        && current.height === rect.height
+          ? current
+          : { top: rect.top, left: rect.left, width: rect.width, height: rect.height },
+      );
+    };
+    measure();
+    // The DJ chunk mounts lazily and can shift the split after the first paint.
+    const timer = window.setTimeout(measure, 60);
+    const observer = new ResizeObserver(measure);
+    const browse = document.querySelector<HTMLElement>("[data-split-browse]");
+    if (browse) observer.observe(browse);
+    window.addEventListener("resize", measure);
+    return () => {
+      window.clearTimeout(timer);
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+      root.dataset.splitMode = "false";
+      setPopupBounds(null);
+    };
+  }, [isSplitMode, splitOrientation]);
   const miniPlayerEnabled = useMiniPlayerEnabled();
   const miniPlayerWindowLive = useMiniPlayerWindowLive();
   const keyboardShortcuts = useKeyboardShortcuts();
@@ -2072,6 +2121,7 @@ useEffect(() => {
 
   return (
     <MotionConfig reducedMotion={reduceMotion ? "always" : "user"}>
+    <PopupBoundsContext.Provider value={popupBounds}>
     <ArtistNavigationProvider onNavigate={handleNavigateArtist}>
     <TrackContextMenuProvider
       libraryController={libraryController}
@@ -2422,6 +2472,7 @@ useEffect(() => {
     </PlaylistContextMenuProvider>
     </TrackContextMenuProvider>
     </ArtistNavigationProvider>
+    </PopupBoundsContext.Provider>
     </MotionConfig>
   );
 }
