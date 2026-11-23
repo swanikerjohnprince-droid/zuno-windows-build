@@ -54,6 +54,7 @@ import {
 import { isTrackKnownInPlaylist } from "../../player/playlistMembership";
 import { ArtistLinks } from "./ArtistLinks";
 import { TagEditor } from "./TagEditor";
+import { clampPopupPosition, popupScrimStyle, popupToastStyle, usePopupBounds } from "../popupBounds";
 
 interface MenuPosition {
   x: number;
@@ -82,6 +83,7 @@ export function TrackContextMenuProvider({
   const libraryState = useLibraryState();
   const playerState = usePlayerSelector((player) => ({ currentTrack: player.currentTrack }), shallowEqual);
   const menuRef = useRef<HTMLDivElement>(null);
+  const popupBounds = usePopupBounds();
   const searchRef = useRef<HTMLInputElement>(null);
   const playlistRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const toastTimerRef = useRef<number | null>(null);
@@ -192,19 +194,18 @@ export function TrackContextMenuProvider({
       const menu = menuRef.current;
       if (!menu) return;
 
-      const viewportMargin = 8;
       const bounds = menu.getBoundingClientRect();
-      const x = Math.max(
-        viewportMargin,
-        Math.min(menuPosition.x, window.innerWidth - bounds.width - viewportMargin),
-      );
-      const y = Math.max(
-        viewportMargin,
-        Math.min(menuPosition.y, window.innerHeight - bounds.height - viewportMargin),
+      // Clamped to the half the menu was opened in: in Split Mode that is the browse half
+      // (or the DJ panel, for a menu opened there), never across the divider.
+      const clamped = clampPopupPosition(
+        menuPosition.x,
+        menuPosition.y,
+        bounds.width,
+        bounds.height,
       );
 
-      if (x !== menuPosition.x || y !== menuPosition.y) {
-        setMenuPosition({ x, y });
+      if (clamped.x !== menuPosition.x || clamped.y !== menuPosition.y) {
+        setMenuPosition(clamped);
       }
     };
 
@@ -707,6 +708,7 @@ export function TrackContextMenuProvider({
       {isPickerOpen && track && (
         <div
           className="fixed inset-0 z-50 grid place-items-center bg-background/70 backdrop-blur-sm"
+          style={popupScrimStyle(popupBounds)}
           onMouseDown={() => {
             if (!addingPlaylistId) setIsPickerOpen(false);
           }}
@@ -823,7 +825,7 @@ export function TrackContextMenuProvider({
       )}
 
       {toast && (
-        <div className="fixed bottom-28 left-1/2 z-[60] flex -translate-x-1/2 items-center gap-2 rounded-full bg-popover/95 px-4 py-2 text-sm text-foreground shadow-2xl backdrop-blur" role="status">
+        <div className="fixed bottom-28 left-1/2 z-[60] flex -translate-x-1/2 items-center gap-2 rounded-full bg-popover/95 px-4 py-2 text-sm text-foreground shadow-2xl backdrop-blur" style={popupToastStyle(popupBounds)} role="status">
           {addingPlaylistId || isRemovingTrack || isLikeMutationPending ? (
             <Loader variant="spinner" size={18} />
           ) : toast === "Already in playlist" ? (

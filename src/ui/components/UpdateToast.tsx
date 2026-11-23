@@ -3,6 +3,7 @@ import { motion } from "motion/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Loader } from "@/components/motion/loader";
 import { CloseIcon } from "@/ui/icons";
+import { popupCornerToastStyle, usePopupBounds } from "../popupBounds";
 import type { UpdateInfo, UpdateInstallProgress } from "../../internal/updateChecker";
 import { installUpdate, snoozeUpdate } from "../../internal/updateChecker";
 
@@ -22,6 +23,7 @@ export function UpdateToast({ update, onDismiss }: UpdateToastProps) {
   const [installing, setInstalling] = useState(false);
   const [progress, setProgress] = useState<UpdateInstallProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const popupBounds = usePopupBounds();
   const releaseLabel = update.canInstall ? "GitHub" : "Download";
 
   useEffect(() => {
@@ -57,6 +59,7 @@ export function UpdateToast({ update, onDismiss }: UpdateToastProps) {
       exit={{ opacity: 0, y: 24, scale: 0.96 }}
       transition={{ type: "spring", stiffness: 400, damping: 32 }}
       className="fixed bottom-28 right-5 z-50 flex max-w-md items-center gap-4 rounded-xl bg-card/95 px-4 py-3 shadow-2xl backdrop-blur"
+      style={popupCornerToastStyle(popupBounds)}
       role="status"
       aria-live="polite"
     >

@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { GitHubIcon, ListIcon } from "@/ui/icons";
 import { parseReleaseNote, RELEASE_NOTE_BODY } from "../../internal/releaseNote";
 import { ExternalLinkButton } from "./ExternalLinkButton";
+import { popupScrimStyle, usePopupBounds } from "../popupBounds";
 import { GITHUB_NEW_ISSUE_URL, GITHUB_RELEASES_URL } from "../links";
 
 interface ReleaseNoteDialogProps {
@@ -23,6 +24,7 @@ interface ReleaseNoteDialogProps {
  */
 export function ReleaseNoteDialog({ version, onDismiss }: ReleaseNoteDialogProps) {
   const dismissRef = useRef<HTMLButtonElement>(null);
+  const popupBounds = usePopupBounds();
 
   useEffect(() => {
     if (!version) return;
@@ -44,6 +46,7 @@ export function ReleaseNoteDialog({ version, onDismiss }: ReleaseNoteDialogProps
           /* Rounded to the window: a square scrim over a rounded window paints past the
              corner cutout. The variable is 0 when maximized, so it follows the window. */
           className="fixed inset-0 z-[200] flex items-center justify-center overflow-hidden rounded-[var(--window-radius)] bg-background/70 p-6 backdrop-blur-sm"
+          style={popupScrimStyle(popupBounds)}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}

@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { ClockIcon, CloseIcon, SearchIcon } from "@/ui/icons";
+import { ClockIcon, CloseIcon, FolderIcon, SearchIcon } from "@/ui/icons";
 import type { Album, Artist, Playlist, SearchResults, Track } from "../../datasource/types";
 import type { SearchController } from "../../player/SearchController";
 import { TrackArtwork } from "./TrackArtwork";
 import { useTrackContextMenu } from "./TrackContextMenu";
 import { isMacOS, primaryModifierLabel } from "../platform";
 import { usePlaylistContextMenu } from "./PlaylistContextMenu";
+import { popupScrimStyle, usePopupBounds } from "../popupBounds";
 
 const RECENT_SEARCHES_KEY = "yt-music-dock:recent-searches";
 const MAX_RECENT_SEARCHES = 5;
@@ -82,6 +83,8 @@ export function SearchOverlay({
 }: SearchOverlayProps) {
   const { openTrackMenu } = useTrackContextMenu();
   const { openPlaylistMenu, openAlbumMenu } = usePlaylistContextMenu();
+  // In Split Mode the overlay covers only the browse half, never the DJ panel.
+  const popupBounds = usePopupBounds();
   const inputRef = useRef<HTMLInputElement>(null);
   const requestIdRef = useRef(0);
   const modifiersRef = useRef({ primary: false, shift: false });
@@ -326,9 +329,9 @@ export function SearchOverlay({
   };
 
   return (
-    <div className="fixed inset-0 z-[70] flex justify-center bg-muted/40 pt-[12vh] backdrop-blur-sm" onMouseDown={onDismiss ?? onClose}>
+    <div className="fixed inset-0 z-[70] flex justify-center bg-muted/40 pt-[12vh] backdrop-blur-sm" style={popupScrimStyle(popupBounds)} onMouseDown={onDismiss ?? onClose}>
       <section
-        className="flex max-h-[70vh] w-[min(40rem,92vw)] flex-col overflow-hidden rounded-2xl bg-card shadow-2xl"
+        className="flex max-h-[70vh] w-[min(40rem,92%)] flex-col overflow-hidden rounded-2xl bg-card shadow-2xl"
         data-onboarding="search-panel"
         role="dialog"
         aria-modal="true"
@@ -388,6 +391,12 @@ export function SearchOverlay({
                     : preview.value.artist}
               </span>
             </span>
+            {preview.type === "track" && preview.value.source === "local" && (
+              <span className="flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                <FolderIcon size={11} aria-hidden="true" />
+                Your files
+              </span>
+            )}
             <span className="flex items-center gap-1 [&_kbd]:rounded [&_kbd]:bg-card [&_kbd]:px-1.5 [&_kbd]:py-0.5 [&_kbd]:font-sans">
               {preview.type === "track" ? "Play" : "Open"}
             </span>
