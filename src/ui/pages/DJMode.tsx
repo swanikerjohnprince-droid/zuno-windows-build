@@ -9,7 +9,6 @@ import { OUTPUT_RESET_EVENT } from "../settings/audioOutputDevice";
 import {
   RELIABLE_CONFIDENCE,
   TEMPO_RANGES,
-  beatTimes,
   formatBpm,
   formatPercent,
   heardBpm,
@@ -121,112 +120,192 @@ function formatTime(seconds: number) {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
 }
 
-const WAVEFORM_HEIGHT = 80;
+/** Width of the vertical waveform strip that sits beside a deck's cover art, in CSS pixels. */
+const WAVEFORM_WIDTH = 56;
+/** Strip height: matches the size-32 artwork it stands beside. */
+const WAVEFORM_STRIP_HEIGHT = 128;
+/** Zoom range: 1 fits the whole track; higher values show less of it around the playhead. */
+const MIN_WAVEFORM_ZOOM = 1;
+const MAX_WAVEFORM_ZOOM = 64;
+const ZOOM_STEP = 1.6;
+/** Both decks share one zoom, remembered across sessions. */
+const WAVEFORM_ZOOM_KEY = "zuno.dj.waveformZoom";
+
+function clampWaveformZoom(zoom: number): number {
+  if (!Number.isFinite(zoom)) return MIN_WAVEFORM_ZOOM;
+  return Math.min(MAX_WAVEFORM_ZOOM, Math.max(MIN_WAVEFORM_ZOOM, zoom));
+}
+
+function readWaveformZoom(): number {
+  try {
+    return clampWaveformZoom(Number(window.localStorage.getItem(WAVEFORM_ZOOM_KEY)) || MIN_WAVEFORM_ZOOM);
+  } catch {
+    return MIN_WAVEFORM_ZOOM;
+  }
+}
+
+function formatZoom(zoom: number): string {
+  return zoom < 10 ? zoom.toFixed(1).replace(/\.0$/, "") : String(Math.round(zoom));
+}
+
+const ZOOM_BUTTON =
+  "grid h-5 min-w-5 place-items-center rounded-md bg-muted px-1 text-[10px] font-bold text-muted-foreground transition-colors hover:bg-primary hover:text-primary-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-muted disabled:hover:text-inherit";
 
 /**
- * The whole song at once, left to right, with the played part lit — the overview a DJ uses to
- * see where the breaks and drops are, as in Mixxx's overview waveform (which likewise shows the
- * full track and is clickable to jump). Peaks are mirrored around the centre line and each
- * pixel column takes the loudest bucket under it, so a transient never disappears when the
- * panel is narrower than the bucket count.
+ * The deck's waveform as a vertical strip beside the cover art — Mixxx's overview waveform stood
+ * on its side: time runs top to bottom, peaks are mirrored around a centre line, and the part
+ * already played is lit. Beat markers are drawn across it the way Mixxx draws its beat grid
+ * (src/widgets/waveformwidget.cpp): a thin line per beat, a heavier one every fourth beat (the
+ * bar), hot cues as amber markers on the edge, the playhead as a bright glowing line — each with
+ * its own colour.
+ *
+ * `zoom` is shared by both decks (DJMode owns it): 1 fits the whole track, and a higher value
+ * shows a window of duration/zoom centred on the playhead, so zooming one deck zooms the other.
+ * Zoom with the buttons under the strip, Ctrl+scroll on the strip, or double-click to fit again.
  */
-function Waveform({
+function DeckWaveform({
   peaks,
   status,
-  fraction,
+  positionSec,
+  durationSec,
   disabled,
   grid,
+  cues,
+  zoom,
+  onZoomChange,
   onSeekFraction,
 }: {
   peaks: Uint8Array | null;
   status: WaveformStatus;
-  fraction: number;
+  positionSec: number;
+  durationSec: number;
   disabled: boolean;
   /** Beat grid in track time, or null when there is no tempo to draw. */
   grid: { firstBeatSec: number; bpm: number; durationSec: number } | null;
+  /** Hot-cue times in seconds, drawn as markers when inside the visible window. */
+  cues: (number | null)[];
+  zoom: number;
+  onZoomChange: (zoom: number) => void;
   onSeekFraction: (fraction: number) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
-  const [width, setWidth] = useState(0);
+  const [size, setSize] = useState({ w: 0, h: 0 });
   const draggingRef = useRef(false);
+  // Refs for the non-passive wheel listener, which must not be re-attached on every render.
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const onZoomChangeRef = useRef(onZoomChange);
+  onZoomChangeRef.current = onZoomChange;
 
   useEffect(() => {
     const node = wrapRef.current;
     if (!node) return;
-    const observer = new ResizeObserver(() => setWidth(Math.floor(node.clientWidth)));
+    const observer = new ResizeObserver(() => setSize({ w: Math.floor(node.clientWidth), h: Math.floor(node.clientHeight) }));
     observer.observe(node);
-    setWidth(Math.floor(node.clientWidth));
+    setSize({ w: Math.floor(node.clientWidth), h: Math.floor(node.clientHeight) });
     return () => observer.disconnect();
   }, []);
 
-  const clamped = Math.max(0, Math.min(1, fraction));
-  const playedPx = Math.round(clamped * width);
-  const ratio = window.devicePixelRatio || 1;
+  // Ctrl+scroll zooms (plain scroll keeps scrolling the page). Non-passive so it can preventDefault.
+  useEffect(() => {
+    const node = wrapRef.current;
+    if (!node) return;
+    const onWheel = (event: WheelEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      event.preventDefault();
+      onZoomChangeRef.current(clampWaveformZoom(zoomRef.current * Math.exp(-event.deltaY * 0.0015)));
+    };
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return () => node.removeEventListener("wheel", onWheel);
+  }, []);
+
+  const clampedPosition = Math.max(0, Math.min(durationSec || 0, positionSec));
+  // The visible time window: the whole track at zoom 1, otherwise duration/zoom around the
+  // playhead (clamped to the track), like Mixxx's zoomed waveform following the play position.
+  const windowDur = durationSec > 0 ? durationSec / Math.max(MIN_WAVEFORM_ZOOM, zoom) : 0;
+  const maxStart = Math.max(0, durationSec - windowDur);
+  const t0 = windowDur <= 0 || windowDur >= durationSec ? 0 : Math.min(Math.max(clampedPosition - windowDur / 2, 0), maxStart);
+  const t1 = t0 + windowDur;
 
   /*
-   * The bar heights depend only on the peaks and the width, never on the playhead, so they are
-   * worked out once here instead of on every redraw. The old draw loop re-scanned the peaks for
-   * every pixel column each time the lit edge moved by a pixel; this leaves the draw effect
-   * with nothing to do but fill rectangles.
+   * One pixel row per strip row; each row takes the loudest bucket under it, so a transient
+   * never disappears when the strip is shorter than the bucket count. Depends on the window, so
+   * a zoomed-in waveform re-scans only when the window actually moves.
    */
-  const columns = useMemo(() => {
-    if (!peaks || peaks.length === 0 || width <= 0) return null;
-    const pixelWidth = Math.max(1, Math.floor(width * ratio));
-    const pixelHeight = Math.floor(WAVEFORM_HEIGHT * ratio);
-    const mid = pixelHeight / 2;
-    const barWidth = Math.max(1, Math.round(ratio));
-    const step = barWidth + (ratio >= 2 ? 1 : 0);
-    const count = Math.ceil(pixelWidth / step);
-    const tops = new Float32Array(count);
-    const heights = new Float32Array(count);
-    for (let column = 0; column < count; column += 1) {
-      const x = column * step;
-      const from = Math.floor((x / pixelWidth) * peaks.length);
-      const to = Math.max(from + 1, Math.ceil(((x + step) / pixelWidth) * peaks.length));
+  const rows = useMemo(() => {
+    if (!peaks || peaks.length === 0 || size.w <= 0 || size.h <= 0 || windowDur <= 0 || durationSec <= 0) return null;
+    const ratio = window.devicePixelRatio || 1;
+    const pixelWidth = Math.max(1, Math.floor(size.w * ratio));
+    const pixelHeight = Math.max(1, Math.floor(size.h * ratio));
+    const mid = pixelWidth / 2;
+    const lefts = new Float32Array(pixelHeight);
+    const widths = new Float32Array(pixelHeight);
+    for (let row = 0; row < pixelHeight; row += 1) {
+      const time = t0 + ((row + 0.5) / pixelHeight) * windowDur;
+      const from = Math.floor((time / durationSec) * peaks.length);
+      const to = Math.max(from + 1, Math.ceil(((time + windowDur / pixelHeight) / durationSec) * peaks.length));
       let peak = 0;
       for (let i = from; i < to && i < peaks.length; i += 1) {
         if (peaks[i] > peak) peak = peaks[i];
       }
-      // A floor of one pixel each side keeps silence visible as a thin line, not a gap.
+      // A floor of one pixel keeps silence visible as a thin line, not a gap.
       const half = Math.max(ratio, (peak / 255) * mid * 0.96);
-      tops[column] = mid - half;
-      heights[column] = half * 2;
+      lefts[row] = mid - half;
+      widths[row] = half * 2;
     }
-    return { pixelWidth, pixelHeight, barWidth, step, count, tops, heights };
-  }, [peaks, width, ratio]);
-
-  // `getComputedStyle` can force a synchronous style recalculation, and it used to run on every
-  // redraw. The colours only change with the theme, which is one attribute on <html>.
-  const colorsRef = useRef<{ key: string; played: string; unplayed: string; tick: string } | null>(null);
+    return { ratio, pixelWidth, pixelHeight, lefts, widths };
+  }, [peaks, size.w, size.h, t0, windowDur, durationSec]);
 
   /*
-   * Beat ticks along the top edge: short on every beat, tall on every fourth. Where beats would be
-   * closer than a few pixels they are drawn for bars only, and where even bars are that close
-   * nothing is drawn — a fence of lines tells a DJ less than a clean waveform does. Like the bar
-   * heights, worked out once here rather than on every redraw of the playhead.
+   * Beat markers across the strip: a line per beat, heavy every fourth (the bar) — Mixxx's beat
+   * grid. Where beats would be closer than a few pixels only bars are drawn, and where even bars
+   * are that close nothing is — a fence of lines tells a DJ less than a clean waveform does.
    */
-  const ticks = useMemo(() => {
-    if (!grid || !columns || grid.durationSec <= 0) return null;
-    const beatPx = ((60 / grid.bpm) / grid.durationSec) * columns.pixelWidth;
-    const minGap = 3 * ratio;
+  const markers = useMemo(() => {
+    if (!grid || !rows || grid.durationSec <= 0 || windowDur <= 0) return null;
+    const spacing = 60 / grid.bpm;
+    if (!(spacing > 0)) return null;
+    const beatPx = (spacing / windowDur) * rows.pixelHeight;
+    const minGap = 3 * rows.ratio;
     const stride = beatPx >= minGap ? 1 : 4;
     if (beatPx * stride < minGap) return null;
-    const beats = beatTimes(grid.firstBeatSec, grid.bpm, grid.durationSec);
-    const xs: number[] = [];
-    const tall: boolean[] = [];
-    beats.forEach((time, index) => {
-      if (index % stride !== 0) return;
-      xs.push((time / grid.durationSec) * columns.pixelWidth);
-      tall.push(index % 4 === 0);
-    });
-    return { xs, tall };
-  }, [grid?.firstBeatSec, grid?.bpm, grid?.durationSec, columns, ratio]);
+    const first = Math.ceil((t0 - grid.firstBeatSec) / spacing);
+    const last = Math.floor((t1 - grid.firstBeatSec) / spacing);
+    const lines: { y: number; bar: boolean }[] = [];
+    for (let k = first; k <= last; k += 1) {
+      if (k % stride !== 0) continue;
+      lines.push({
+        y: ((grid.firstBeatSec + k * spacing - t0) / windowDur) * rows.pixelHeight,
+        bar: k % 4 === 0,
+      });
+    }
+    return lines;
+  }, [grid?.firstBeatSec, grid?.bpm, grid?.durationSec, rows, t0, t1, windowDur]);
+
+  /** Hot cues inside the window, as row positions for the amber edge markers. */
+  const cueMarks = useMemo(() => {
+    if (!rows || windowDur <= 0) return null;
+    const marks: number[] = [];
+    for (const cue of cues) {
+      if (cue == null || cue < t0 || cue > t1) continue;
+      marks.push(((cue - t0) / windowDur) * rows.pixelHeight);
+    }
+    return marks;
+  }, [cues, rows, t0, t1, windowDur]);
+
+  // `getComputedStyle` can force a synchronous style recalculation; the colours only change with
+  // the theme, which is one attribute on <html>.
+  const colorsRef = useRef<{ key: string; played: string; unplayed: string; line: string } | null>(null);
+
+  const playedRow = rows && windowDur > 0
+    ? Math.max(0, Math.min(rows.pixelHeight, Math.round(((clampedPosition - t0) / windowDur) * rows.pixelHeight)))
+    : 0;
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !columns) return;
-    const { pixelWidth, pixelHeight, barWidth, step, count, tops, heights } = columns;
+    if (!canvas || !rows) return;
+    const { ratio, pixelWidth, pixelHeight, lefts, widths } = rows;
     if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
     if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
     const ctx = canvas.getContext("2d");
@@ -239,55 +318,75 @@ function Waveform({
       const styles = getComputedStyle(canvas);
       colorsRef.current = {
         key: themeKey,
-        played: styles.getPropertyValue("--color-primary").trim() || "#00cccc",
+        played: styles.getPropertyValue("--color-primary").trim() || "#ff0033",
         unplayed: styles.getPropertyValue("--color-muted-foreground").trim() || "#888",
-        tick: styles.getPropertyValue("--color-foreground").trim() || "#fff",
+        line: styles.getPropertyValue("--color-foreground").trim() || "#fff",
       };
     }
-    const { played, unplayed, tick } = colorsRef.current;
+    const { played, unplayed, line } = colorsRef.current;
 
-    // Columns are laid out left to right, so "played" is simply the first `split` of them.
-    const playedEdge = clamped * pixelWidth;
-    const split = Math.max(0, Math.min(count, Math.floor((playedEdge - barWidth) / step) + 1));
-
-    // Two paths and two fills rather than one fillRect (and one style change) per column.
+    // Time runs top to bottom, so "played" is the rows above the playhead row. Two paths and two
+    // fills rather than one fillRect (and one style change) per row.
     ctx.globalAlpha = 1;
     ctx.fillStyle = played;
     ctx.beginPath();
-    for (let column = 0; column < split; column += 1) {
-      ctx.rect(column * step, tops[column], barWidth, heights[column]);
-    }
+    for (let row = 0; row < playedRow; row += 1) ctx.rect(lefts[row], row, widths[row], 1);
     ctx.fill();
 
     ctx.globalAlpha = 0.45;
     ctx.fillStyle = unplayed;
     ctx.beginPath();
-    for (let column = split; column < count; column += 1) {
-      ctx.rect(column * step, tops[column], barWidth, heights[column]);
-    }
+    for (let row = playedRow; row < pixelHeight; row += 1) ctx.rect(lefts[row], row, widths[row], 1);
     ctx.fill();
-
-    if (ticks) {
-      const tickWidth = Math.max(1, Math.round(ratio * 0.75));
-      ctx.globalAlpha = 0.7;
-      ctx.fillStyle = tick;
-      ctx.beginPath();
-      for (let i = 0; i < ticks.xs.length; i += 1) {
-        ctx.rect(ticks.xs[i], 0, tickWidth, (ticks.tall[i] ? 9 : 5) * ratio);
-      }
-      ctx.fill();
-    }
     ctx.globalAlpha = 1;
-    // playedPx (not the raw fraction) is the dependency: redrawing on every tick that
-    // doesn't move the lit edge by a whole pixel would be pure waste.
+
+    // Beat grid: thin line per beat, heavy line per bar.
+    if (markers) {
+      for (const marker of markers) {
+        ctx.globalAlpha = marker.bar ? 0.8 : 0.28;
+        ctx.fillStyle = line;
+        ctx.fillRect(0, Math.floor(marker.y), pixelWidth, Math.max(1, Math.round((marker.bar ? 2 : 1) * ratio * 0.75)));
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // Hot cues: amber triangles on the left edge.
+    if (cueMarks && cueMarks.length > 0) {
+      ctx.fillStyle = "#f59e0b";
+      for (const y of cueMarks) {
+        const yy = Math.floor(y);
+        ctx.beginPath();
+        ctx.moveTo(0, yy - 3 * ratio);
+        ctx.lineTo(5 * ratio, yy);
+        ctx.lineTo(0, yy + 3 * ratio);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
+    // Playhead: a bright line with a glow so it reads over the played fill.
+    if (windowDur > 0) {
+      const y = Math.max(0, Math.min(pixelHeight - 1, playedRow));
+      ctx.save();
+      ctx.shadowColor = played;
+      ctx.shadowBlur = 4 * ratio;
+      ctx.fillStyle = played;
+      ctx.fillRect(0, y, pixelWidth, Math.max(1, Math.round(ratio)));
+      ctx.restore();
+    }
+    // playedRow (not the raw position) is the dependency: redrawing on every clock tick that does
+    // not move the playhead by a whole row would be pure waste.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [columns, playedPx, ticks]);
+  }, [rows, markers, cueMarks, playedRow, windowDur]);
 
   const seekFromEvent = (event: React.PointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    onSeekFraction(Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)));
+    if (rect.height <= 0 || durationSec <= 0 || windowDur <= 0) return;
+    const time = t0 + Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)) * windowDur;
+    onSeekFraction(Math.max(0, Math.min(1, time / durationSec)));
   };
+
+  const fraction = durationSec > 0 ? clampedPosition / durationSec : 0;
 
   return (
     <div
@@ -296,13 +395,16 @@ function Waveform({
       aria-label="Track position"
       aria-valuemin={0}
       aria-valuemax={100}
-      aria-valuenow={Math.round(clamped * 100)}
+      aria-valuenow={Math.round(fraction * 100)}
       aria-disabled={disabled}
+      title={windowDur > 0 && windowDur < durationSec
+        ? `Waveform ${formatTime(t0)} – ${formatTime(t1)} · click/drag to seek · Ctrl+scroll to zoom (shared by both decks) · double-click to fit`
+        : "Click or drag to seek · Ctrl+scroll to zoom (shared by both decks) · double-click to fit the whole track"}
       className={cn(
-        "relative w-full select-none overflow-hidden rounded-lg bg-background/40",
+        "relative select-none overflow-hidden rounded-xl bg-background/40",
         disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer",
       )}
-      style={{ height: WAVEFORM_HEIGHT, touchAction: "none" }}
+      style={{ width: WAVEFORM_WIDTH, height: WAVEFORM_STRIP_HEIGHT, touchAction: "none" }}
       onPointerDown={(event) => {
         if (disabled) return;
         draggingRef.current = true;
@@ -318,31 +420,47 @@ function Waveform({
       onPointerCancel={() => {
         draggingRef.current = false;
       }}
+      onDoubleClick={() => onZoomChange(MIN_WAVEFORM_ZOOM)}
     >
       {status === "ready" ? (
-        <canvas ref={canvasRef} className="block size-full" style={{ width: "100%", height: WAVEFORM_HEIGHT }} />
+        <canvas ref={canvasRef} className="block size-full" style={{ width: "100%", height: "100%" }} />
       ) : (
         <>
-          {/* No peaks to draw: a plain progress bar, so the position still reads and seeking still works. */}
-          <div className="absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-muted-foreground/25" />
+          {/* No peaks to draw: a vertical progress bar, so the position still reads and seeking still works. */}
+          <div className="absolute inset-y-0 left-1/2 w-1.5 -translate-x-1/2 rounded-full bg-muted-foreground/25" />
           <div
-            className="absolute left-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-primary"
-            style={{ width: `${clamped * 100}%` }}
+            className="absolute left-1/2 top-0 w-1.5 -translate-x-1/2 rounded-full bg-primary"
+            style={{ height: `${fraction * 100}%` }}
           />
           <div
             className={cn(
-              "pointer-events-none absolute inset-0 grid place-items-center pb-9 text-[10px] font-semibold tracking-wide text-muted-foreground",
+              "pointer-events-none absolute inset-x-0 bottom-0 bg-background/70 p-1 text-center text-[8px] font-semibold leading-tight text-muted-foreground",
               status === "loading" && "animate-pulse",
             )}
           >
-            {status === "loading" && "Analysing waveform…"}
-            {status === "unavailable" && "Waveform not ready — it appears once the track has loaded"}
+            {status === "loading" && "Analysing…"}
+            {status === "unavailable" && "Not ready"}
           </div>
         </>
       )}
-      {status === "ready" && (
-        <div className="pointer-events-none absolute inset-y-0 w-px bg-foreground" style={{ left: `${clamped * 100}%` }} />
-      )}
+    </div>
+  );
+}
+
+/** Zoom controls under a deck's waveform strip; they drive the one zoom both decks share. */
+function WaveformZoomControls({ zoom, onZoomChange }: { zoom: number; onZoomChange: (zoom: number) => void }) {
+  return (
+    <div className="flex items-center gap-1" title="Waveform zoom — shared by both decks">
+      <button type="button" aria-label="Zoom waveform out" disabled={zoom <= MIN_WAVEFORM_ZOOM} onClick={() => onZoomChange(zoom / ZOOM_STEP)} className={ZOOM_BUTTON}>−</button>
+      <button
+        type="button"
+        aria-label="Fit the whole track in the waveform"
+        onClick={() => onZoomChange(MIN_WAVEFORM_ZOOM)}
+        className={cn(ZOOM_BUTTON, "w-9 tabular-nums")}
+      >
+        {zoom <= MIN_WAVEFORM_ZOOM ? "FIT" : `×${formatZoom(zoom)}`}
+      </button>
+      <button type="button" aria-label="Zoom waveform in" disabled={zoom >= MAX_WAVEFORM_ZOOM} onClick={() => onZoomChange(zoom * ZOOM_STEP)} className={ZOOM_BUTTON}>+</button>
     </div>
   );
 }
@@ -458,6 +576,8 @@ function Deck({
   hotCues,
   dragState,
   grid,
+  zoom,
+  onZoomChange,
   tempo,
   tempoActions,
 }: {
@@ -480,6 +600,9 @@ function Deck({
   /** A queue track is being dragged: null = no drag, otherwise which deck (if any) it is over. */
   dragState: DragTarget;
   grid: { firstBeatSec: number; bpm: number; durationSec: number } | null;
+  /** Waveform zoom shared by both decks (DJMode owns the value). */
+  zoom: number;
+  onZoomChange: (zoom: number) => void;
   tempo: DeckTempoView;
   tempoActions: DeckTempoActions;
 }) {
@@ -536,24 +659,36 @@ function Deck({
         </div>
       </div>
 
-      <div className="mb-4 grid place-items-center">
-        <div className="relative size-32 overflow-hidden rounded-xl bg-muted shadow-lg">
+      {/*
+        Cover art with the deck's vertical waveform beside it — the two decks sit side by side,
+        so their waveforms do too. The zoom controls under the strip drive the one zoom value both
+        decks share.
+      */}
+      <div className="mb-4 flex items-center justify-center gap-3">
+        <div className="relative grid size-32 shrink-0 place-items-center overflow-hidden rounded-xl bg-muted shadow-lg">
           {track?.artworkUrl ? (
             <TrackArtwork artworkUrl={track.artworkUrl} className="size-full" size={180} iconSize={30} />
           ) : <MusicNoteIcon size={34} className="text-muted-foreground" />}
           <div className="pointer-events-none absolute inset-0 rounded-xl ring-1 ring-inset ring-white/10" />
         </div>
+        <div className="flex flex-col items-center gap-1.5">
+          <DeckWaveform
+            peaks={peaks}
+            status={waveformStatus}
+            positionSec={position}
+            durationSec={duration}
+            disabled={locked || !duration}
+            grid={grid}
+            cues={hotCues}
+            zoom={zoom}
+            onZoomChange={onZoomChange}
+            onSeekFraction={(fraction) => onSeek(fraction * duration)}
+          />
+          <WaveformZoomControls zoom={zoom} onZoomChange={onZoomChange} />
+        </div>
       </div>
 
       <div className="mb-3 rounded-xl bg-background/70 p-2">
-        <Waveform
-          peaks={peaks}
-          status={waveformStatus}
-          fraction={duration ? position / duration : 0}
-          disabled={locked || !duration}
-          grid={grid}
-          onSeekFraction={(fraction) => onSeek(fraction * duration)}
-        />
         <input
           aria-label={`Deck ${side} position`}
           type="range"
@@ -927,6 +1062,19 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
   const [dragTarget, setDragTarget] = useState<DragTarget>(null);
   // The scrolling page body, so a drag near its top or bottom edge can scroll it.
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Waveform zoom is one value for both decks — zooming one deck's strip zooms the other's too —
+  // and it is remembered across sessions.
+  const [waveformZoom, setWaveformZoomState] = useState<number>(readWaveformZoom);
+  const setWaveformZoom = useCallback((zoom: number) => {
+    const clamped = clampWaveformZoom(zoom);
+    setWaveformZoomState(clamped);
+    try {
+      window.localStorage.setItem(WAVEFORM_ZOOM_KEY, String(clamped));
+    } catch {
+      // Private mode or a full quota: the zoom just does not outlive the session.
+    }
+  }, []);
 
   // --- tempo: one hook owns the analysis, faders, BPM overrides, SYNC and the engine send ------
   const deckA = session.currentTrack;
@@ -1329,6 +1477,8 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             hotCues={hotCuesA}
             dragState={dragTarget}
             grid={djTempo.gridFor(waveformA, djTempo.bpmA)}
+            zoom={waveformZoom}
+            onZoomChange={setWaveformZoom}
             tempo={djTempo.tempoView("A")}
             tempoActions={djTempo.tempoActions("A")}
           />
@@ -1365,6 +1515,8 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             hotCues={hotCuesB}
             dragState={dragTarget}
             grid={djTempo.gridFor(waveformB, djTempo.bpmB)}
+            zoom={waveformZoom}
+            onZoomChange={setWaveformZoom}
             tempo={djTempo.tempoView("B")}
             tempoActions={djTempo.tempoActions("B")}
           />
