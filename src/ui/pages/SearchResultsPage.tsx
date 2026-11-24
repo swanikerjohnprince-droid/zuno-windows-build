@@ -10,6 +10,7 @@ import type {
   SearchResults,
   Track,
 } from "../../datasource/types";
+import { isLocalPlaylist } from "../../player/localPlaylists";
 import { libraryController, type PlayerControllerActions } from "../../player/playerStore";
 import { AlbumCard } from "../components/AlbumCard";
 import { ArtistLinks } from "../components/ArtistLinks";
@@ -144,7 +145,28 @@ export function SearchResultsPage({
    * would leave arrow-down walking through hidden entries.
    */
   const scopedResults = useMemo<SearchResults>(() => {
-    if (scope === "all") return results;
+    /*
+     * A category deep search replaces the remote lists for that scope, but the local matches
+     * from the mixed search are still matches for this query, so they ride along in the Songs
+     * and Playlists scopes too — mixed in, not split into their own section.
+     */
+    const addLocal = (base: SearchResults): SearchResults => {
+      let next = base;
+      if (scope === "songs") {
+        const localTracks = results.tracks.filter((track) => track.source === "local");
+        const known = new Set(next.tracks.map((track) => track.id));
+        const extra = localTracks.filter((track) => !known.has(track.id));
+        if (extra.length > 0) next = { ...next, tracks: [...extra, ...next.tracks] };
+      }
+      if (scope === "playlists") {
+        const localPlaylists = results.playlists.filter((playlist) => isLocalPlaylist(playlist));
+        const known = new Set(next.playlists.map((playlist) => playlist.id));
+        const extra = localPlaylists.filter((playlist) => !known.has(playlist.id));
+        if (extra.length > 0) next = { ...next, playlists: [...extra, ...next.playlists] };
+      }
+      return next;
+    };
+    if (scope === "all") return addLocal(results);
 
     // The deep search is already filtered; the mixed results still need narrowing, and stand
     // in while the deep one is loading or after it has failed.
@@ -159,30 +181,20 @@ export function SearchResultsPage({
       + narrowed.albums.length + narrowed.playlists.length;
     // A deep search that came back empty is not a reason to show nothing when the mixed
     // search had something for this category.
-    return total > 0 || !deepResults ? narrowed : {
+    return addLocal(total > 0 || !deepResults ? narrowed : {
       ...EMPTY_RESULTS,
       artists: scope === "artists" ? results.artists : [],
       tracks: scope === "songs" ? results.tracks : [],
       albums: scope === "albums" ? results.albums : [],
       playlists: scope === "playlists" ? results.playlists : [],
-    };
+    });
   }, [deepResults, results, scope]);
 
   /*
-   * Local files ("Your files") get their own section above Songs in the "All" scope, so a
-   * match on disk is never buried under YouTube results — and each row carries the badge
-   * saying the file is on this machine.
+   * Local results are not split into their own section: SearchController mixes them ahead of
+   * the remote ones in each category, and the rows/cards badge them "Your files" inline, so a
+   * match on disk sits right next to the YouTube match for the same query.
    */
-  const localTracks = useMemo(
-    () => scopedResults.tracks.filter((track) => track.source === "local"),
-    [scopedResults],
-  );
-  const remoteTracks = useMemo(
-    () => scopedResults.tracks.filter((track) => track.source !== "local"),
-    [scopedResults],
-  );
-  const showLocalSection = scope === "all" && localTracks.length > 0;
-  const songsTracks = showLocalSection ? remoteTracks : scopedResults.tracks;
 
   const availableScopes = useMemo(
     () => SCOPES.filter(
@@ -324,8 +336,7 @@ export function SearchResultsPage({
     "--search-enter-delay": `${Math.min(Math.max(index, 0), 18) * 28}ms`,
   } as CSSProperties), []);
 
-  /* One row shape shared by the "From your files" section and Songs, so the local badge
-     and the context menu / keyboard selection behave identically in both. */
+  /* One row shape for the Songs list; local files carry their "Your files" badge inline. */
   const renderTrackRow = (track: Track, displayIndex: number) => {
     const index = flatItems.findIndex(
       (item) => item.kind === "track" && item.track.id === track.id,
@@ -409,7 +420,7 @@ export function SearchResultsPage({
       ) : (
         <div className="flex flex-col gap-8">
           {scopedResults.artists.length > 0 && (
-            <section className="flex flex-col gap-3" style={{ order: songsFirst ? 2 : 1 }}>
+            <section className="flex flex-col gap-3" style={{ order: songsFirst ? 1 : 0 }}>
               <h2>Artists</h2>
               <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(9.5rem,1fr))]">
                 {scopedResults.artists.map((artist) => {
@@ -442,29 +453,17 @@ export function SearchResultsPage({
             </section>
           )}
 
-          {showLocalSection && (
-            <section className="flex flex-col gap-3" style={{ order: 0 }}>
-              <h2 className="flex items-center gap-2">
-                <FolderIcon size={16} aria-hidden="true" />
-                From your files
-              </h2>
-              <div className="flex flex-col gap-0.5">
-                {localTracks.map((track, displayIndex) => renderTrackRow(track, displayIndex))}
-              </div>
-            </section>
-          )}
-
-          {songsTracks.length > 0 && (
-            <section className="flex flex-col gap-3" style={{ order: songsFirst ? 1 : 2 }}>
+          {scopedResults.tracks.length > 0 && (
+            <section className="flex flex-col gap-3" style={{ order: songsFirst ? 0 : 1 }}>
               <h2>Songs</h2>
               <div className="flex flex-col gap-0.5" data-onboarding="search-results">
-                {songsTracks.map((track, displayIndex) => renderTrackRow(track, displayIndex))}
+                {scopedResults.tracks.map((track, displayIndex) => renderTrackRow(track, displayIndex))}
               </div>
             </section>
           )}
 
           {scopedResults.albums.length > 0 && (
-            <section className="flex flex-col gap-3" style={{ order: 3 }}>
+            <section className="flex flex-col gap-3" style={{ order: 2 }}>
               <h2>Albums</h2>
               <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(9.5rem,1fr))]">
                 {scopedResults.albums.map((album) => {
@@ -496,7 +495,7 @@ export function SearchResultsPage({
           )}
 
           {scopedResults.playlists.length > 0 && (
-            <section className="flex flex-col gap-3" style={{ order: 4 }}>
+            <section className="flex flex-col gap-3" style={{ order: 3 }}>
               <h2>Playlists</h2>
               <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(9.5rem,1fr))]">
                 {scopedResults.playlists.map((playlist) => {
@@ -514,7 +513,13 @@ export function SearchResultsPage({
                       <AlbumCard
                         artworkUrl={playlist.artworkUrl}
                         title={playlist.title}
-                        subtitle={playlist.owner}
+                        subtitleContent={isLocalPlaylist(playlist) ? (
+                          <span className="flex items-center gap-1">
+                            <FolderIcon size={11} aria-hidden="true" />
+                            Your files
+                          </span>
+                        ) : undefined}
+                        subtitle={isLocalPlaylist(playlist) ? undefined : playlist.owner}
                         onClick={() => onOpenPlaylist(playlist)}
                         onContextMenu={(event) => openPlaylistMenu(event, playlist)}
                       />

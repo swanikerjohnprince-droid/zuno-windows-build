@@ -3,6 +3,7 @@ import { cn } from "@/lib/utils";
 import { ClockIcon, CloseIcon, FolderIcon, SearchIcon } from "@/ui/icons";
 import type { Album, Artist, Playlist, SearchResults, Track } from "../../datasource/types";
 import type { SearchController } from "../../player/SearchController";
+import { isLocalPlaylist } from "../../player/localPlaylists";
 import { TrackArtwork } from "./TrackArtwork";
 import { useTrackContextMenu } from "./TrackContextMenu";
 import { isMacOS, primaryModifierLabel } from "../platform";
@@ -391,7 +392,8 @@ export function SearchOverlay({
                     : preview.value.artist}
               </span>
             </span>
-            {preview.type === "track" && preview.value.source === "local" && (
+            {((preview.type === "track" && preview.value.source === "local")
+              || (preview.type === "playlist" && isLocalPlaylist(preview.value))) && (
               <span className="flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
                 <FolderIcon size={11} aria-hidden="true" />
                 Your files

@@ -8,8 +8,15 @@
  */
 export {};
 
-import { LOCAL_SEARCH_LIMIT, localMatchScore, matchLocalTracks } from "./localSearch";
+import {
+  LOCAL_PLAYLIST_SEARCH_LIMIT,
+  LOCAL_SEARCH_LIMIT,
+  localMatchScore,
+  matchLocalPlaylists,
+  matchLocalTracks,
+} from "./localSearch";
 import type { Track } from "../datasource/types";
+import type { LocalPlaylist } from "./localPlaylists";
 
 function check(condition: boolean, message: string): void {
   if (!condition) throw new Error(`FAILED: ${message}`);
@@ -82,3 +89,18 @@ equal(matchLocalTracks([], "midnight").length, 0, "empty index returns empty");
 const many = Array.from({ length: 20 }, (_, i) => localTrack(`t${i}`, `Song number ${i}`));
 equal(matchLocalTracks(many, "song").length, LOCAL_SEARCH_LIMIT, "results are capped at the limit");
 equal(LOCAL_SEARCH_LIMIT, 8, "the cap is 8");
+
+// --- local playlists -------------------------------------------------------------
+
+const playlists: LocalPlaylist[] = [
+  { id: "local:1", name: "Road trip", paths: [] },
+  { id: "local:2", name: "Café mornings", paths: [] },
+  { id: "local:3", name: "Gym", paths: [] },
+];
+
+equal(matchLocalPlaylists(playlists, "road").map((p) => p.id).join(","), "local:1", "playlist name match");
+equal(matchLocalPlaylists(playlists, "cafe").map((p) => p.id).join(","), "local:2", "diacritics-insensitive playlist match");
+equal(matchLocalPlaylists(playlists, "road trip")[0].kind, "local", "converted playlist carries kind local");
+equal(matchLocalPlaylists(playlists, "   ").length, 0, "blank playlist query matches nothing");
+equal(matchLocalPlaylists([], "road").length, 0, "no playlists returns empty");
+equal(LOCAL_PLAYLIST_SEARCH_LIMIT, 4, "the playlist cap is 4");

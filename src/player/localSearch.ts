@@ -1,8 +1,10 @@
-import type { Track } from "../datasource/types";
+import type { Playlist, Track } from "../datasource/types";
 import {
   getLocalPlaylists,
+  localPlaylistToPlaylist,
   scanLocalAudioPaths,
   subscribeToLocalPlaylists,
+  type LocalPlaylist,
 } from "./localPlaylists";
 import {
   filesTabSourcePaths,
@@ -80,6 +82,34 @@ export function matchLocalTracks(
   }
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, limit).map((entry) => entry.track);
+}
+
+export const LOCAL_PLAYLIST_SEARCH_LIMIT = 4;
+
+/**
+ * Pure matcher for local playlists, exported so the self-check can drive it. A local playlist
+ * answers to its name only — it has no artist or album to match against. Results come back as
+ * full `Playlist` objects (kind "local"), so every surface can badge them via isLocalPlaylist.
+ */
+export function matchLocalPlaylists(
+  playlists: readonly LocalPlaylist[],
+  query: string,
+  limit = LOCAL_PLAYLIST_SEARCH_LIMIT,
+): Playlist[] {
+  const q = query.trim();
+  if (!q) return [];
+  const scored = playlists
+    .map((playlist) => ({ playlist, score: localMatchScore(playlist.name, q) }))
+    .filter((entry) => entry.score > 0);
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map((entry) => localPlaylistToPlaylist(entry.playlist));
+}
+
+/** Local playlists live in memory, so this needs no scan and answers synchronously. */
+export function searchLocalPlaylists(query: string): Playlist[] {
+  const q = query.trim();
+  if (!q) return [];
+  return matchLocalPlaylists(getLocalPlaylists(), q);
 }
 
 function collectPaths(): string[] {
