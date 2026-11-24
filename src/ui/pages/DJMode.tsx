@@ -167,12 +167,15 @@ const CUE_COLOR = "#f59e0b";
  * `zoom` is shared by both decks (DJMode owns it): 1 fits the whole track, and a higher value
  * shows a window of duration/zoom centred on the playhead, so zooming one deck zooms the other.
  * Zoom with the buttons under the strip, a scroll or pinch gesture on the strip (a touchpad
- * pinch arrives as Ctrl+wheel), or double-click to fit again.
+ * pinch arrives as Ctrl+wheel), or double-click to fit again. While zoomed in, the strip redraws
+ * on every animation frame from the engine's live clock (`getPositionSec`), so the window scrolls
+ * smoothly with the playhead instead of stepping at the 100 ms display-clock rate.
  */
 function DeckWaveform({
   peaks,
   status,
   positionSec,
+  getPositionSec,
   durationSec,
   disabled,
   grid,
@@ -184,6 +187,8 @@ function DeckWaveform({
   peaks: Uint8Array | null;
   status: WaveformStatus;
   positionSec: number;
+  /** Live clock from the audio engine, sampled per animation frame while zoomed in. */
+  getPositionSec?: () => number;
   durationSec: number;
   disabled: boolean;
   /** Beat grid in track time, or null when there is no tempo to draw. */
@@ -206,6 +211,29 @@ function DeckWaveform({
   zoomRef.current = zoom;
   const onZoomChangeRef = useRef(onZoomChange);
   onZoomChangeRef.current = onZoomChange;
+  const getPositionSecRef = useRef(getPositionSec);
+  getPositionSecRef.current = getPositionSec;
+  const positionRef = useRef(positionSec);
+  positionRef.current = positionSec;
+
+  // While zoomed in, the visible window follows the playhead, so the strip has to scroll at
+  // display frame rate — the parent's 100 ms display clock would step it at 10 Hz. Sample the
+  // engine's live clock on every animation frame instead; at zoom 1 the playhead crosses the
+  // strip slowly enough that the prop-driven 10 Hz update is plenty.
+  const zoomed = status === "ready" && !disabled && durationSec > 0 && zoom > MIN_WAVEFORM_ZOOM;
+  const [livePosition, setLivePosition] = useState(positionSec);
+  useEffect(() => {
+    if (!zoomed) return;
+    let raf = 0;
+    const loop = () => {
+      // Same value → React bails out of the re-render, so a paused deck costs nothing.
+      setLivePosition(getPositionSecRef.current?.() ?? positionRef.current);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [zoomed]);
+  const displayPosition = zoomed ? livePosition : positionSec;
 
   useEffect(() => {
     const node = wrapRef.current;
@@ -232,7 +260,7 @@ function DeckWaveform({
     return () => node.removeEventListener("wheel", onWheel);
   }, []);
 
-  const clampedPosition = Math.max(0, Math.min(durationSec || 0, positionSec));
+  const clampedPosition = Math.max(0, Math.min(durationSec || 0, displayPosition));
   // The visible time window: the whole track at zoom 1, otherwise duration/zoom around the
   // playhead (clamped to the track), like Mixxx's zoomed waveform following the play position.
   const windowDur = durationSec > 0 ? durationSec / Math.max(MIN_WAVEFORM_ZOOM, zoom) : 0;
@@ -603,6 +631,7 @@ function Deck({
   side,
   track,
   position,
+  getPositionSec,
   duration,
   playing,
   trim,
@@ -625,6 +654,8 @@ function Deck({
   side: "A" | "B";
   track: Track | null;
   position: number;
+  /** Live clock from the audio engine, used to scroll the waveform smoothly while zoomed in. */
+  getPositionSec?: () => number;
   duration: number;
   playing: boolean;
   trim: number;
@@ -718,6 +749,7 @@ function Deck({
             peaks={peaks}
             status={waveformStatus}
             positionSec={position}
+            getPositionSec={getPositionSec}
             durationSec={duration}
             disabled={locked || !duration}
             grid={grid}
@@ -1505,6 +1537,9 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             side="A"
             track={deckA}
             position={deckAPosition}
+            getPositionSec={() =>
+              session.status === "playing" ? Math.max(0, playerController.getCurrentTime()) : session.positionSec
+            }
             duration={durationA}
             playing={session.status === "playing"}
             trim={trimA}
@@ -1528,6 +1563,11 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             side="B"
             track={deckB}
             position={deckBPosition}
+            getPositionSec={() =>
+              deckBPlaying && deckBStartedAt
+                ? Math.min(durationB, ((Date.now() - deckBStartedAt) / 1000) * djTempo.deckBRateRef.current)
+                : deckBPosition
+            }
             duration={durationB}
             playing={deckBPlaying}
             trim={trimB}
@@ -1590,10 +1630,6 @@ export function DJMode({ session, playerController, onClose }: DJModeProps) {
             <div className="mt-1 flex justify-between text-[9px] font-bold text-muted-foreground">
               <span>DECK A</span><span>CENTER MIX</span><span>DECK B</span>
             </div>
-            <p className="mt-3 text-[10px] text-muted-foreground">
-              Both decks can play at the same time. Move the crossfader left/right to blend or switch between them,
-              or let MIX A → B do it for you with the native engine's real crossfade.
-            </p>
 
             <div className="mt-4 flex items-center gap-3 border-t border-white/5 pt-4">
               <button
