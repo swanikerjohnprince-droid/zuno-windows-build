@@ -5,6 +5,7 @@ import { LibraryController } from "./LibraryController";
 import { PlayerController, type PlayerSession, type PlayerState } from "./PlayerController";
 import { SearchController } from "./SearchController";
 import { initLocalSearchIndex, searchLocalPlaylists, searchLocalTracks } from "./localSearch";
+import { initShemenIndex, searchShemenTracks } from "./shemenSearch";
 import { TabManager } from "./TabManager";
 import { loadAppSession } from "./appSession";
 import { readSessionRestoreEnabled } from "../ui/settings/sessionRestore";
@@ -18,7 +19,13 @@ const dataSource = new YouTubeMusicDataSource();
 
 export const libraryController = new LibraryController(dataSource);
 initLocalSearchIndex();
-export const searchController = new SearchController(dataSource, searchLocalTracks, searchLocalPlaylists);
+initShemenIndex();
+export const searchController = new SearchController(
+  dataSource,
+  searchLocalTracks,
+  searchLocalPlaylists,
+  searchShemenTracks,
+);
 /*
  * The offline queue needs a stream URL but must not depend on any particular data source, so
  * the source is injected here where both are already in scope.
@@ -65,6 +72,7 @@ type PlayerControllerMethod =
   | "resetAfterOutputChange"
   | "getTrackAnalysis"
   | "setDjDeckTempos"
+  | "setDjDeckKeylock"
   | "togglePlayPause"
   | "addToQueue"
   | "playNext"
@@ -131,6 +139,7 @@ class ActivePlayerController implements PlayerControllerActions {
   resetAfterOutputChange = () => tabManager.getActivePlayer().resetAfterOutputChange();
   getTrackAnalysis = (track: Track, buckets: number) => tabManager.getActivePlayer().getTrackAnalysis(track, buckets);
   setDjDeckTempos = (activeTempo: number, standbyTempo: number) => tabManager.getActivePlayer().setDjDeckTempos(activeTempo, standbyTempo);
+  setDjDeckKeylock = (activeKeylock: boolean, standbyKeylock: boolean) => tabManager.getActivePlayer().setDjDeckKeylock(activeKeylock, standbyKeylock);
   togglePlayPause = () => tabManager.getActivePlayer().togglePlayPause();
   addToQueue = (track: Parameters<PlayerController["addToQueue"]>[0]) =>
     tabManager.getActivePlayer().addToQueue(track);

@@ -1,10 +1,10 @@
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "motion/react";
-import { FolderIcon, HomeIcon } from "@/ui/icons";
+import { FolderIcon, HomeIcon, MusicNoteIcon } from "@/ui/icons";
 import { popupScrimStyle, usePopupBounds } from "../popupBounds";
 
-export type NewTabKind = "music" | "files";
+export type NewTabKind = "music" | "files" | "shemen";
 
 interface NewTabPickerProps {
   open: boolean;
@@ -13,8 +13,8 @@ interface NewTabPickerProps {
 }
 
 /**
- * What the "+" tab button asks before creating anything: a classic YouTube Music tab, or a
- * file manager tab for local audio on the PC.
+ * What the "+" tab button asks before creating anything: a classic YouTube Music tab, a
+ * file manager tab for local audio on the PC, or a shemenmusic.com instrumentals tab.
  *
  * Portalled and centred like ReleaseNoteDialog, so it survives whatever view is mounted when
  * the button is clicked. Escape and a scrim click both dismiss without creating a tab.
@@ -86,6 +86,18 @@ export function NewTabPicker({ open, onPick, onClose }: NewTabPickerProps) {
                   <span className="text-sm font-semibold text-foreground">File manager</span>
                   <span className="truncate text-xs text-muted-foreground">
                     Play audio files from your PC
+                  </span>
+                </span>
+              </button>
+
+              <button type="button" onClick={() => onPick("shemen")} className={optionClass}>
+                <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+                  <MusicNoteIcon size={18} aria-hidden="true" />
+                </span>
+                <span className="flex min-w-0 flex-col">
+                  <span className="text-sm font-semibold text-foreground">Shemen Music</span>
+                  <span className="truncate text-xs text-muted-foreground">
+                    Royalty-free instrumentals from shemenmusic.com
                   </span>
                 </span>
               </button>

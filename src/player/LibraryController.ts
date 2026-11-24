@@ -740,6 +740,10 @@ export class LibraryController {
       }
       return addLocalTrackToPlaylist(track, playlist);
     }
+    // A shemen track has no YouTube id to send and no file path for a local playlist.
+    if (track.source !== "youtube") {
+      throw new Error("Only YouTube Music songs can be added to playlists.");
+    }
     if (!this.dataSource.addTrackToPlaylist) {
       throw new Error("Adding songs to playlists is unavailable.");
     }
@@ -801,6 +805,8 @@ export class LibraryController {
       removeLocalTrackFromPlaylist(track, playlist);
       return;
     }
+    // Nothing outside YouTube can be removed from a YouTube playlist.
+    if (track.source !== "youtube") return;
     if (!this.dataSource.removeTrackFromPlaylist) {
       logInternalError("LibraryController.removeTrackFromPlaylist unavailable", {
         dataSource: this.dataSource.constructor.name,

@@ -11,6 +11,11 @@ export class SearchController {
     private readonly searchLocal?: (query: string) => Promise<Track[]>,
     /** Local playlists, merged into the playlist results the same way. Sync: they live in memory. */
     private readonly searchLocalPlaylists?: (query: string) => Playlist[],
+    /**
+     * Optional shemenmusic.com search. Its instrumental tracks merge into the track results
+     * ahead of the remote ones, exactly like local files; the UI badges them "Instrumental".
+     */
+    private readonly searchShemen?: (query: string) => Promise<Track[]>,
   ) {}
 
   async search(
@@ -22,27 +27,48 @@ export class SearchController {
       return { artists: [], tracks: [], albums: [], playlists: [] };
     }
 
-    // Local playlists are in memory, so they are available immediately; local tracks need the scan.
+    // Local playlists are in memory, so they are available immediately; local and shemen
+    // tracks need their indexes, which answer in milliseconds once warm.
     const localPlaylists = this.searchLocalPlaylists?.(normalizedQuery) ?? [];
 
     let localTracks: Track[] = [];
+    let shemenTracks: Track[] = [];
+    // Emit whatever extras have landed straight away, so the preview shows something
+    // while the network search is still running.
+    const emitExtras = () => {
+      if (!onUpdate) return;
+      if (localTracks.length > 0 || shemenTracks.length > 0 || localPlaylists.length > 0) {
+        onUpdate({
+          artists: [],
+          tracks: [...localTracks, ...shemenTracks],
+          albums: [],
+          playlists: localPlaylists,
+        });
+      }
+    };
     const localStream = this.searchLocal
       ? Promise.resolve()
           .then(() => this.searchLocal?.(normalizedQuery) ?? [])
           .then((tracks) => {
             localTracks = tracks;
-            // Local files answer in milliseconds — emit them straight away so the preview
-            // shows something while the network search is still running.
-            if ((tracks.length > 0 || localPlaylists.length > 0) && onUpdate) {
-              onUpdate({ artists: [], tracks, albums: [], playlists: localPlaylists });
-            }
+            emitExtras();
+            return tracks;
+          })
+          .catch(() => [] as Track[])
+      : Promise.resolve([] as Track[]);
+    const shemenStream = this.searchShemen
+      ? this.searchShemen(normalizedQuery)
+          .then((tracks) => {
+            shemenTracks = tracks;
+            emitExtras();
             return tracks;
           })
           .catch(() => [] as Track[])
       : Promise.resolve([] as Track[]);
 
     const mergedOnUpdate = onUpdate
-      ? (results: SearchResults) => onUpdate(this.mergeLocal(results, localTracks, localPlaylists))
+      ? (results: SearchResults) =>
+          onUpdate(this.mergeExtras(results, [...localTracks, ...shemenTracks], localPlaylists))
       : undefined;
 
     let remote: SearchResults;
@@ -54,24 +80,24 @@ export class SearchController {
       });
       remote = { artists: [], tracks, albums: [], playlists: [] };
     }
-    await localStream;
-    return this.mergeLocal(remote, localTracks, localPlaylists);
+    await Promise.all([localStream, shemenStream]);
+    return this.mergeExtras(remote, [...localTracks, ...shemenTracks], localPlaylists);
   }
 
   /**
-   * Local results are mixed into their section ahead of the remote ones rather than split out;
-   * ids never collide across sources (local ids carry a `local:` prefix). Callers badge the
-   * local entries inline ("Your files").
+   * Non-YouTube results (local files, shemenmusic) are mixed into their section ahead of the
+   * remote ones rather than split out; ids never collide across sources (they carry `local:`
+   * or `shemen:` prefixes). Callers badge those entries inline ("Your files" / "Instrumental").
    */
-  private mergeLocal(
+  private mergeExtras(
     results: SearchResults,
-    localTracks: Track[],
+    extraTracks: Track[],
     localPlaylists: Playlist[],
   ): SearchResults {
-    if (!localTracks.length && !localPlaylists.length) return results;
+    if (!extraTracks.length && !localPlaylists.length) return results;
     return {
       ...results,
-      tracks: [...localTracks, ...results.tracks],
+      tracks: [...extraTracks, ...results.tracks],
       playlists: [...localPlaylists, ...results.playlists],
     };
   }

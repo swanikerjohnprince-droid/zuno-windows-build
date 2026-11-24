@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { ClockIcon, CloseIcon, FolderIcon, SearchIcon } from "@/ui/icons";
+import { ClockIcon, CloseIcon, FolderIcon, MusicNoteIcon, SearchIcon } from "@/ui/icons";
 import type { Album, Artist, Playlist, SearchResults, Track } from "../../datasource/types";
 import type { SearchController } from "../../player/SearchController";
 import { isLocalPlaylist } from "../../player/localPlaylists";
@@ -397,6 +397,12 @@ export function SearchOverlay({
               <span className="flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
                 <FolderIcon size={11} aria-hidden="true" />
                 Your files
+              </span>
+            )}
+            {preview.type === "track" && preview.value.source === "shemen" && (
+              <span className="flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                <MusicNoteIcon size={11} aria-hidden="true" />
+                Instrumental
               </span>
             )}
             <span className="flex items-center gap-1 [&_kbd]:rounded [&_kbd]:bg-card [&_kbd]:px-1.5 [&_kbd]:py-0.5 [&_kbd]:font-sans">

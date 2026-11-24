@@ -1,4 +1,4 @@
-export type TrackSource = "youtube" | "local";
+export type TrackSource = "youtube" | "local" | "shemen";
 
 export interface ArtistReference {
   id: string;

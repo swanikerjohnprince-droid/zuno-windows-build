@@ -26,8 +26,8 @@ export function DownloadButton() {
   const track = usePlayerSelector((state) => state.currentTrack);
   const offline = useOfflineState();
 
-  // Local files are already on disk; a download control for them is a button that lies.
-  if (!track || track.source === "local") return null;
+  // Non-YouTube tracks have no YouTube download; a control for them is a button that lies.
+  if (!track || track.source !== "youtube") return null;
 
   const isReady = Boolean(offline.entries[track.id]);
   const isDownloading = offline.downloadingId === track.id;

@@ -88,7 +88,7 @@ function DownloadAction({ track }: { track: Track }) {
   const status = getOfflineStatus(track.id);
   const isDownloading = status === "downloading";
 
-  if (track.source === "local") return null;
+  if (track.source !== "youtube") return null;
 
   const label = status === "ready"
     ? `Remove ${track.title} from downloads`
@@ -210,8 +210,8 @@ function RatingActions({ track }: { track: Track }) {
   const { rateTrack } = useTrackContextMenu();
   const libraryState = useLibraryState();
 
-  // Local files have no YouTube rating to set, and a signed-out session has nowhere to put one.
-  if (track.source === "local") return null;
+  // Non-YouTube tracks have no YouTube rating to set, and a signed-out session has nowhere to put one.
+  if (track.source !== "youtube") return null;
 
   const rating = libraryController.getTrackRating(track.id);
   const isPending = libraryState.pendingLikeTrackIds.has(track.id);
@@ -552,7 +552,7 @@ export const TrackRow = memo(function TrackRow({
       {showAlbum && (
         <span className="hidden min-w-0 flex-1 basis-0 truncate text-xs text-muted-foreground lg:block">
           {track.album
-            ? (openAlbumForTrack && track.source !== "local" ? (
+            ? (openAlbumForTrack && track.source === "youtube" ? (
               /*
                 A span with role="link", not an anchor or a button: the row itself is a
                 <button>, and nesting interactive elements is invalid markup that the parser

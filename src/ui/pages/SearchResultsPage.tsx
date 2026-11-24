@@ -1,7 +1,7 @@
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { SpinnerSteps } from "@/components/motion/loader";
-import { FolderIcon, PlayActiveIcon } from "@/ui/icons";
+import { FolderIcon, MusicNoteIcon, PlayActiveIcon } from "@/ui/icons";
 import type {
   Album,
   Artist,
@@ -33,7 +33,7 @@ type SelectableItem =
   | { kind: "album"; album: Album }
   | { kind: "playlist"; playlist: Playlist };
 
-type SearchScope = "all" | "songs" | "artists" | "albums" | "playlists";
+type SearchScope = "all" | "songs" | "artists" | "albums" | "playlists" | "instrumentals";
 
 const SCOPES: Array<{
   value: SearchScope;
@@ -41,12 +41,22 @@ const SCOPES: Array<{
   field: keyof SearchResults;
   /** The filter YouTube Music runs for a deep search of this scope. */
   category?: SearchCategory;
+  /** Tab badge count when the scope shows a subset of its field (instrumentals within tracks). */
+  count?: (results: SearchResults) => number;
 }> = [
   { value: "all", label: "All", field: "tracks" },
   { value: "songs", label: "Songs", field: "tracks", category: "song" },
   { value: "artists", label: "Artists", field: "artists", category: "artist" },
   { value: "albums", label: "Albums", field: "albums", category: "album" },
   { value: "playlists", label: "Playlists", field: "playlists", category: "playlist" },
+  // Shemen tracks ride inside the mixed track list; this scope shows only those. No category,
+  // so there is no YouTube deep search — the mixed results are already the complete set.
+  {
+    value: "instrumentals",
+    label: "Instrumentals",
+    field: "tracks",
+    count: (results) => results.tracks.filter((track) => track.source === "shemen").length,
+  },
 ];
 
 const EMPTY_RESULTS: SearchResults = { artists: [], tracks: [], albums: [], playlists: [] };
@@ -153,9 +163,10 @@ export function SearchResultsPage({
     const addLocal = (base: SearchResults): SearchResults => {
       let next = base;
       if (scope === "songs") {
-        const localTracks = results.tracks.filter((track) => track.source === "local");
+        // Non-YouTube matches (local files and shemen instrumentals) survive the deep search.
+        const extraTracks = results.tracks.filter((track) => track.source !== "youtube");
         const known = new Set(next.tracks.map((track) => track.id));
-        const extra = localTracks.filter((track) => !known.has(track.id));
+        const extra = extraTracks.filter((track) => !known.has(track.id));
         if (extra.length > 0) next = { ...next, tracks: [...extra, ...next.tracks] };
       }
       if (scope === "playlists") {
@@ -171,9 +182,12 @@ export function SearchResultsPage({
     // The deep search is already filtered; the mixed results still need narrowing, and stand
     // in while the deep one is loading or after it has failed.
     const source = deepResults ?? results;
+    const narrowTracks = (tracks: Track[]) => (scope === "instrumentals"
+      ? tracks.filter((track) => track.source === "shemen")
+      : tracks);
     const narrowed: SearchResults = {
       artists: scope === "artists" ? source.artists : [],
-      tracks: scope === "songs" ? source.tracks : [],
+      tracks: scope === "songs" || scope === "instrumentals" ? narrowTracks(source.tracks) : [],
       albums: scope === "albums" ? source.albums : [],
       playlists: scope === "playlists" ? source.playlists : [],
     };
@@ -184,7 +198,7 @@ export function SearchResultsPage({
     return addLocal(total > 0 || !deepResults ? narrowed : {
       ...EMPTY_RESULTS,
       artists: scope === "artists" ? results.artists : [],
-      tracks: scope === "songs" ? results.tracks : [],
+      tracks: scope === "songs" || scope === "instrumentals" ? narrowTracks(results.tracks) : [],
       albums: scope === "albums" ? results.albums : [],
       playlists: scope === "playlists" ? results.playlists : [],
     });
@@ -198,7 +212,8 @@ export function SearchResultsPage({
 
   const availableScopes = useMemo(
     () => SCOPES.filter(
-      (item) => item.value === "all" || results[item.field].length > 0,
+      (item) => item.value === "all"
+        || (item.count ? item.count(results) : results[item.field].length) > 0,
     ),
     [results],
   );
@@ -336,7 +351,7 @@ export function SearchResultsPage({
     "--search-enter-delay": `${Math.min(Math.max(index, 0), 18) * 28}ms`,
   } as CSSProperties), []);
 
-  /* One row shape for the Songs list; local files carry their "Your files" badge inline. */
+  /* One row shape for the Songs list; local files carry "Your files", shemen tracks "Instrumental". */
   const renderTrackRow = (track: Track, displayIndex: number) => {
     const index = flatItems.findIndex(
       (item) => item.kind === "track" && item.track.id === track.id,
@@ -367,6 +382,12 @@ export function SearchResultsPage({
           <span className="flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
             <FolderIcon size={11} aria-hidden="true" />
             Your files
+          </span>
+        )}
+        {track.source === "shemen" && (
+          <span className="flex shrink-0 items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+            <MusicNoteIcon size={11} aria-hidden="true" />
+            Instrumental
           </span>
         )}
         <PlayActiveIcon size={18} />
@@ -404,7 +425,7 @@ export function SearchResultsPage({
                 {item.label}
                 {item.value !== "all" && (
                   <span className="ml-1.5 tabular-nums opacity-60">
-                    {results[item.field].length}
+                    {item.count ? item.count(results) : results[item.field].length}
                   </span>
                 )}
               </button>

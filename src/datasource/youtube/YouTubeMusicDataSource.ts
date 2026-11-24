@@ -57,6 +57,11 @@ import { getPreferredLyricsSourceId } from "../../internal/lyricsSourcePreferenc
 import { isVideoId, looksLikeYouTubeLink, parseYouTubeLink } from "./links";
 import { isTrackDownloaded } from "../../player/offlineStore";
 import {
+  getShemenTrackById,
+  shemenDownloadUrl,
+  SHEMEN_TRACK_PREFIX,
+} from "../../player/shemenSearch";
+import {
   getDownloadQuality,
   getStreamingQuality,
   selectFormatForQuality,
@@ -4232,7 +4237,7 @@ export class YouTubeMusicDataSource extends DataSource {
    * unlike the local record it also knows about songs added anywhere other than here.
    */
   async getPlaylistIdsContainingTrack(track: Track): Promise<string[]> {
-    if (!this.musicCookie || track.source === "local") return [];
+    if (!this.musicCookie || track.source !== "youtube") return [];
 
     const client = await this.getMusicClient();
     const response = await client.actions.execute("/playlist/get_add_to_playlist", {
@@ -4573,6 +4578,12 @@ export class YouTubeMusicDataSource extends DataSource {
   async getTrack(id: string): Promise<Track> {
     const trackId = id;
     if (!trackId) throw new Error("A track id is required.");
+    // Shemen tracks are resolved from the in-memory shemen index, not from YouTube.
+    if (trackId.startsWith(SHEMEN_TRACK_PREFIX)) {
+      const shemenTrack = await getShemenTrackById(trackId);
+      if (!shemenTrack) throw new Error(`No shemenmusic.com track for id ${trackId}.`);
+      return shemenTrack;
+    }
     const cacheKey = `youtube-music:track:v1:${trackId}`;
     const cached = await getCachedJson<Track>(cacheKey);
 
@@ -6192,6 +6203,29 @@ export class YouTubeMusicDataSource extends DataSource {
   }
 
   async getStreamData(track: Track): Promise<StreamData> {
+    /*
+     * Shemen tracks are plain mp3s on a static host: no signed URL and no googlevideo range
+     * semantics, so the Rust `stream` reference (which requires a declared content length)
+     * does not fit. Download through the media server instead — the loopback URL it returns
+     * plays on every engine mode.
+     */
+    if (track.source === "shemen") {
+      const payload = await invoke<NativeAudioSourcePayload>("fetch_audio_source", {
+        url: shemenDownloadUrl(track.id),
+        trackId: track.id,
+        mimeType: "audio/mpeg",
+      });
+      if (payload.byteLength === 0) {
+        throw new Error("Shemen audio download returned no data.");
+      }
+      logInternalInfo("YouTubeMusicDataSource.getStreamData shemen download success", {
+        trackId: track.id,
+        byteLength: payload.byteLength,
+        sourceUrl: payload.url,
+      });
+      return { mimeType: payload.mimeType, sourceUrl: payload.url };
+    }
+
     if (usesRustAudioEngine()) {
       return this.getRustStreamData(track);
     }

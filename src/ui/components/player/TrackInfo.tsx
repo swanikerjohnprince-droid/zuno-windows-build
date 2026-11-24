@@ -45,7 +45,7 @@ export function TrackInfo() {
   const isLikeStatusLoading =
     (libraryState.status === "restoring" || libraryState.status === "loading")
     && !libraryState.library;
-  const canLikeCurrentTrack = currentTrack.source !== "local";
+  const canLikeCurrentTrack = currentTrack.source === "youtube";
   const isLikePending = canLikeCurrentTrack && libraryState.pendingLikeTrackIds.has(currentTrack.id);
   const isLiked = canLikeCurrentTrack && (libraryState.library?.likedSongs.some(
     (track) => track.id === currentTrack.id,

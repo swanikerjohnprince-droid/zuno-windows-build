@@ -35,6 +35,9 @@ const HistoryPage = lazy(() =>
 const FilesPage = lazy(() =>
   import("./pages/FilesPage").then((m) => ({ default: m.FilesPage })),
 );
+const ShemenPage = lazy(() =>
+  import("./pages/ShemenPage").then((m) => ({ default: m.ShemenPage })),
+);
 const SettingsPage = lazy(() =>
   import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
 const LyricsView = lazy(() => import("./pages/LyricsView").then((m) => ({ default: m.LyricsView })));
@@ -219,6 +222,8 @@ function getNavigationKey(state: TabViewState): string {
       return "library";
     case "files":
       return "files";
+    case "shemen":
+      return "shemen";
   }
 }
 
@@ -1183,9 +1188,26 @@ export default function App() {
     setNextTabId((currentId) => currentId + 1);
   };
 
+  /* Same single-destination treatment as the Files tab: one Shemen tab, no TabManager
+     entry — the page is a shemenmusic.com browser with its own search, not a player tab. */
+  const createShemenTab = () => {
+    playerUIStore.setLyricsOpen(false);
+    const shemenTab = tabs.find((tab) => tab.view === "shemen");
+    if (shemenTab) {
+      setActiveTabId(shemenTab.id);
+      return;
+    }
+
+    const newId = nextTabId.toString();
+    setTabs((prevTabs) => [...prevTabs, { id: newId, view: "shemen", title: "Shemen" }]);
+    setActiveTabId(newId);
+    setNextTabId((currentId) => currentId + 1);
+  };
+
   const handlePickNewTab = (kind: NewTabKind) => {
     setNewTabPickerOpen(false);
     if (kind === "files") createFilesTab();
+    else if (kind === "shemen") createShemenTab();
     else createTab();
   };
 
@@ -1767,6 +1789,7 @@ export default function App() {
       if (
         eventMatchesShortcut(event, keyboardShortcuts.search)
         && activeTab?.view !== "settings"
+        && activeTab?.view !== "shemen"
       ) {
         event.preventDefault();
         if (isSearchOpen) dismissSearch();
@@ -1787,7 +1810,7 @@ export default function App() {
       }
 
       if (eventMatchesShortcut(event, keyboardShortcuts.navigateBack)) {
-        if (isSearchOpen && activeTab?.view !== "settings") {
+        if (isSearchOpen && activeTab?.view !== "settings" && activeTab?.view !== "shemen") {
           event.preventDefault();
           setIsSearchOpen(false);
           return;
@@ -2190,7 +2213,7 @@ useEffect(() => {
           onSidebarWidthChange={setSidebarWidth}
           onNavigateAlbum={handleNavigateAlbum}
           onNavigatePlaylist={handleNavigatePlaylist}
-          showSearchBar={!isDJMode && activeTab?.view !== "settings" && !playerUIState.isLyricsOpen}
+          showSearchBar={!isDJMode && activeTab?.view !== "settings" && activeTab?.view !== "shemen" && !playerUIState.isLyricsOpen}
           onOpenSearch={() => setIsSearchOpen(true)}
           canGoBack={canNavigateBack}
           canGoForward={canNavigateForward}
@@ -2324,6 +2347,9 @@ useEffect(() => {
             )}
             {activeTab?.view === "files" && (
               <FilesPage playerController={playerController} />
+            )}
+            {activeTab?.view === "shemen" && (
+              <ShemenPage playerController={playerController} />
             )}
             {activeTab?.view === "browse" && (
               <BrowsePage

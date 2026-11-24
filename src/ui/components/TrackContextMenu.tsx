@@ -158,7 +158,7 @@ export function TrackContextMenuProvider({
    * remains the whole answer for local playlists and for a source that cannot be asked.
    */
   useEffect(() => {
-    if (!isPickerOpen || !track || track.source === "local") {
+    if (!isPickerOpen || !track || track.source !== "youtube") {
       setRemoteMembership(NO_MEMBERSHIP);
       return;
     }
@@ -460,7 +460,7 @@ export function TrackContextMenuProvider({
   };
 
   const rateTrack = async (selectedTrack: Track, rating: TrackRating) => {
-    if (selectedTrack.source === "local") return;
+    if (selectedTrack.source !== "youtube") return;
     if (libraryState.status === "signed-out" || !libraryState.library) {
       showToast("Sign in to like");
       return;
@@ -488,14 +488,14 @@ export function TrackContextMenuProvider({
     }
   };
 
-  const selectedTrackIsLiked = track && track.source !== "local"
+  const selectedTrackIsLiked = track && track.source === "youtube"
     ? libraryState.library?.likedSongs.some((item) => item.id === track.id) ?? false
     : false;
-  const isLikeMutationPending = track && track.source !== "local"
+  const isLikeMutationPending = track && track.source === "youtube"
     ? libraryState.pendingLikeTrackIds.has(track.id)
     : false;
-  const canLikeSelectedTrack = track?.source !== "local";
-  const canCopySelectedTrackLink = track?.source !== "local";
+  const canLikeSelectedTrack = track?.source === "youtube";
+  const canCopySelectedTrackLink = track?.source === "youtube";
   /*
    * Subscribed rather than read once: a download finishing while the menu is open should change
    * the item from "Cancel download" to "Remove download" under the cursor, not go stale.
@@ -570,18 +570,21 @@ export function TrackContextMenuProvider({
             <ListIcon size={18} aria-hidden="true" />
             <span className="flex-1">Add to queue</span>
           </button>
-          {/* Needs a YouTube video id to seed the mix — a local file has nothing to seed from. */}
-          {track.source !== "local" && (
+          {/* Needs a YouTube video id to seed the mix — a non-YouTube track has nothing to seed from. */}
+          {track.source === "youtube" && (
             <button type="button" role="menuitem" className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-card disabled:pointer-events-none disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onClick={startRadio}>
               <RadioIcon size={18} aria-hidden="true" />
               <span className="flex-1">Start radio</span>
             </button>
           )}
+          {/* Hidden for shemen tracks: they have no YouTube id to send and no file path for a local playlist. */}
+          {track?.source !== "shemen" && (
           <button type="button" role="menuitem" className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-card disabled:pointer-events-none disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onClick={openPicker}>
             <PlaylistAddIcon size={18} aria-hidden="true" />
             <span className="flex-1">Add to playlist</span>
             <kbd>Ctrl S</kbd>
           </button>
+          )}
           {canLikeSelectedTrack && (
             <button
               type="button"
@@ -603,11 +606,12 @@ export function TrackContextMenuProvider({
             </button>
           )}
           {/*
-            Hidden for local files: they are already on disk, so "download for offline" would be
-            a no-op that implies otherwise. The label follows the track's real state so one item
-            covers download, cancel and remove rather than three that are mostly disabled.
+            YouTube tracks only: local files are already on disk and shemen tracks are fetched
+            through the media server on play, so "download for offline" would be a no-op that
+            implies otherwise. The label follows the track's real state so one item covers
+            download, cancel and remove rather than three that are mostly disabled.
           */}
-          {track && track.source !== "local" && (
+          {track && track.source === "youtube" && (
             <button
               type="button"
               role="menuitem"
@@ -654,8 +658,8 @@ export function TrackContextMenuProvider({
               <span className="flex-1">Edit tags</span>
             </button>
           )}
-          {/* Streamed tracks only: a local file has no YouTube page to be related to. */}
-          {onOpenAlbum && track?.album && track.source !== "local" && (
+          {/* Streamed tracks only: a non-YouTube track has no YouTube page to be related to. */}
+          {onOpenAlbum && track?.album && track.source === "youtube" && (
             <button
               type="button"
               role="menuitem"
@@ -670,7 +674,7 @@ export function TrackContextMenuProvider({
               <span className="flex-1 truncate">Go to album</span>
             </button>
           )}
-          {onOpenRelated && track && track.source !== "local" && (
+          {onOpenRelated && track && track.source === "youtube" && (
             <button
               type="button"
               role="menuitem"

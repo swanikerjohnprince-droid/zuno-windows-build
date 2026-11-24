@@ -523,7 +523,8 @@ export class PlayerController {
        * Only a track we know nothing about still has to wait.
        */
       let track: Track;
-      if (queuedTrack?.source === "local") {
+      // Local and shemen rows already carry full metadata, so no getTrack round trip.
+      if (queuedTrack && queuedTrack.source !== "youtube") {
         track = queuedTrack;
       } else if (knownTrack) {
         track = mergeWithQueued(knownTrack);
@@ -1360,10 +1361,16 @@ export class PlayerController {
         });
       }
 
-      if (track.source === "local") {
+      /*
+       * Local and shemen tracks both load through the fallback path: their StreamData carries
+       * a loopback sourceUrl rather than bytes or a Rust reference, which loadNativeFallback
+       * serves on every engine mode. On the Rust engine loadTrack would refuse a track with
+       * no rustSource, so this branch has to come before that dispatch.
+       */
+      if (track.source !== "youtube") {
         const audioData = await this.dataSource.getStreamData?.(track);
         if (!audioData) {
-          throw new Error("The data source does not support local audio playback.");
+          throw new Error("The data source does not support playback for this track source.");
         }
         await this.audioEngine.loadNativeFallback(
           track.id,
@@ -1378,7 +1385,7 @@ export class PlayerController {
           this.audioEngine.seekTo(this.pendingSeekTime);
           this.pendingSeekTime = null;
         }
-        logInternalInfo("PlayerController.ensureTrackLoaded local success", {
+        logInternalInfo("PlayerController.ensureTrackLoaded direct-source success", {
           trackId: track.id,
           durationMs: Math.round(performance.now() - startedAt),
         });
@@ -1505,7 +1512,7 @@ export class PlayerController {
         trackId: track.id,
       });
       const detail = getErrorMessage(error);
-      if (track.source === "local" || this.audioEngine.usesNativeAudio()) {
+      if (track.source !== "youtube" || this.audioEngine.usesNativeAudio()) {
         throw new Error(`Unable to load audio data for playback. ${detail}`);
       }
       throw new Error(`Unable to load YouTube player for playback. ${detail}`);
@@ -1590,6 +1597,12 @@ export class PlayerController {
    */
   async getTrackAnalysis(track: Track, buckets: number): Promise<rustAudio.TrackAnalysis | null> {
     if (!this.audioEngine.usesRustAudio()) return null;
+    /*
+     * Shemen audio reaches Rust only through the media server on demand; there is no
+     * Rust-side source reference to analyse, and waiting on a stream buffer would stall
+     * the waveform for the whole 8s timeout.
+     */
+    if (track.source === "shemen") return null;
     const key = `${track.id}:${buckets}`;
     const cached = this.waveformCache.get(key);
     if (cached) return cached;
@@ -1641,6 +1654,11 @@ export class PlayerController {
     await this.audioEngine.setDeckTempos(activeTempo, standbyTempo);
   }
 
+  /** Turns keylock (pitch-preserving tempo) on or off for the active/standby decks. */
+  async setDjDeckKeylock(activeKeylock: boolean, standbyKeylock: boolean): Promise<void> {
+    await this.audioEngine.setDeckKeylock(activeKeylock, standbyKeylock);
+  }
+
   getCuedDuration(track: Track): number {
     return this.audioEngine.getPreloadedDuration(track.id) || track.durationSec || 0;
   }
@@ -1680,6 +1698,12 @@ export class PlayerController {
     if (this.djDeckActive) return;
     const next = this.peekNextTrack();
     if (!next) return;
+    /*
+     * Shemen tracks have no signed URL to resolve and load through the media server on
+     * demand, so there is nothing to warm — warming the download would fetch the whole
+     * mp3 twice for the same play.
+     */
+    if (next.source === "shemen") return;
 
     /*
      * Metadata first, and for both engines.
