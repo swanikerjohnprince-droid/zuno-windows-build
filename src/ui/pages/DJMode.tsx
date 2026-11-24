@@ -120,10 +120,10 @@ function formatTime(seconds: number) {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
 }
 
-/** Width of the vertical waveform strip that sits beside a deck's cover art, in CSS pixels. */
-const WAVEFORM_WIDTH = 56;
-/** Strip height: matches the size-32 artwork it stands beside. */
-const WAVEFORM_STRIP_HEIGHT = 128;
+/** Width of the vertical waveform strip at the far end of a deck, in CSS pixels. */
+const WAVEFORM_WIDTH = 80;
+/** Strip height: taller than the cover art, like a Mixxx overview waveform. */
+const WAVEFORM_STRIP_HEIGHT = 208;
 /** Zoom range: 1 fits the whole track; higher values show less of it around the playhead. */
 const MIN_WAVEFORM_ZOOM = 1;
 const MAX_WAVEFORM_ZOOM = 64;
@@ -149,19 +149,25 @@ function formatZoom(zoom: number): string {
 }
 
 const ZOOM_BUTTON =
-  "grid h-5 min-w-5 place-items-center rounded-md bg-muted px-1 text-[10px] font-bold text-muted-foreground transition-colors hover:bg-primary hover:text-primary-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-muted disabled:hover:text-inherit";
+  "grid h-6 min-w-6 place-items-center rounded-md bg-muted px-1 text-[11px] font-bold text-muted-foreground transition-colors hover:bg-primary hover:text-primary-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-muted disabled:hover:text-inherit";
+
+/** Beat grid colour: distinct from the played/unplayed waveform and the amber hot cues. */
+const BEAT_COLOR = "#38bdf8";
+/** Hot-cue marker colour. */
+const CUE_COLOR = "#f59e0b";
 
 /**
- * The deck's waveform as a vertical strip beside the cover art — Mixxx's overview waveform stood
- * on its side: time runs top to bottom, peaks are mirrored around a centre line, and the part
- * already played is lit. Beat markers are drawn across it the way Mixxx draws its beat grid
- * (src/widgets/waveformwidget.cpp): a thin line per beat, a heavier one every fourth beat (the
- * bar), hot cues as amber markers on the edge, the playhead as a bright glowing line — each with
- * its own colour.
+ * The deck's waveform as a vertical strip at the far end of the deck — Mixxx's overview waveform
+ * stood on its side: time runs top to bottom, peaks are mirrored around a centre line. Every
+ * element has its own colour so the coding reads at a glance: the played part is the theme's
+ * primary, the unplayed part muted, the beat grid blue (a thin line per beat, a heavier one every
+ * fourth beat / bar — Mixxx's beat grid, src/widgets/waveformwidget.cpp), hot cues amber
+ * triangles on the edge, and the playhead a glowing white line with a primary halo.
  *
  * `zoom` is shared by both decks (DJMode owns it): 1 fits the whole track, and a higher value
  * shows a window of duration/zoom centred on the playhead, so zooming one deck zooms the other.
- * Zoom with the buttons under the strip, Ctrl+scroll on the strip, or double-click to fit again.
+ * Zoom with the buttons under the strip, a scroll or pinch gesture on the strip (a touchpad
+ * pinch arrives as Ctrl+wheel), or double-click to fit again.
  */
 function DeckWaveform({
   peaks,
@@ -192,6 +198,9 @@ function DeckWaveform({
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const draggingRef = useRef(false);
+  // Active pointers on the strip, so a two-finger pinch can zoom instead of seek.
+  const pointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const pinchRef = useRef<{ startDist: number; startZoom: number } | null>(null);
   // Refs for the non-passive wheel listener, which must not be re-attached on every render.
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
@@ -207,14 +216,17 @@ function DeckWaveform({
     return () => observer.disconnect();
   }, []);
 
-  // Ctrl+scroll zooms (plain scroll keeps scrolling the page). Non-passive so it can preventDefault.
+  // Scroll or pinch on the strip zooms — a touchpad pinch arrives as Ctrl+wheel, a two-finger
+  // scroll as a plain wheel event; both are handled here. Non-passive so the page never scrolls
+  // instead of the waveform zooming.
   useEffect(() => {
     const node = wrapRef.current;
     if (!node) return;
     const onWheel = (event: WheelEvent) => {
-      if (!(event.ctrlKey || event.metaKey)) return;
       event.preventDefault();
-      onZoomChangeRef.current(clampWaveformZoom(zoomRef.current * Math.exp(-event.deltaY * 0.0015)));
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 120 : 1;
+      const dy = event.deltaY * unit;
+      onZoomChangeRef.current(clampWaveformZoom(zoomRef.current * Math.exp(-dy * 0.0012)));
     };
     node.addEventListener("wheel", onWheel, { passive: false });
     return () => node.removeEventListener("wheel", onWheel);
@@ -296,7 +308,7 @@ function DeckWaveform({
 
   // `getComputedStyle` can force a synchronous style recalculation; the colours only change with
   // the theme, which is one attribute on <html>.
-  const colorsRef = useRef<{ key: string; played: string; unplayed: string; line: string } | null>(null);
+  const colorsRef = useRef<{ key: string; played: string; unplayed: string } | null>(null);
 
   const playedRow = rows && windowDur > 0
     ? Math.max(0, Math.min(rows.pixelHeight, Math.round(((clampedPosition - t0) / windowDur) * rows.pixelHeight)))
@@ -320,10 +332,9 @@ function DeckWaveform({
         key: themeKey,
         played: styles.getPropertyValue("--color-primary").trim() || "#ff0033",
         unplayed: styles.getPropertyValue("--color-muted-foreground").trim() || "#888",
-        line: styles.getPropertyValue("--color-foreground").trim() || "#fff",
       };
     }
-    const { played, unplayed, line } = colorsRef.current;
+    const { played, unplayed } = colorsRef.current;
 
     // Time runs top to bottom, so "played" is the rows above the playhead row. Two paths and two
     // fills rather than one fillRect (and one style change) per row.
@@ -333,44 +344,45 @@ function DeckWaveform({
     for (let row = 0; row < playedRow; row += 1) ctx.rect(lefts[row], row, widths[row], 1);
     ctx.fill();
 
-    ctx.globalAlpha = 0.45;
+    ctx.globalAlpha = 0.8;
     ctx.fillStyle = unplayed;
     ctx.beginPath();
     for (let row = playedRow; row < pixelHeight; row += 1) ctx.rect(lefts[row], row, widths[row], 1);
     ctx.fill();
     ctx.globalAlpha = 1;
 
-    // Beat grid: thin line per beat, heavy line per bar.
+    // Beat grid in its own colour: thin line per beat, heavy line per bar.
     if (markers) {
+      ctx.fillStyle = BEAT_COLOR;
       for (const marker of markers) {
-        ctx.globalAlpha = marker.bar ? 0.8 : 0.28;
-        ctx.fillStyle = line;
-        ctx.fillRect(0, Math.floor(marker.y), pixelWidth, Math.max(1, Math.round((marker.bar ? 2 : 1) * ratio * 0.75)));
+        ctx.globalAlpha = marker.bar ? 1 : 0.6;
+        ctx.fillRect(0, Math.floor(marker.y), pixelWidth, Math.max(1, Math.round((marker.bar ? 3 : 1.25) * ratio)));
       }
       ctx.globalAlpha = 1;
     }
 
     // Hot cues: amber triangles on the left edge.
     if (cueMarks && cueMarks.length > 0) {
-      ctx.fillStyle = "#f59e0b";
+      ctx.fillStyle = CUE_COLOR;
       for (const y of cueMarks) {
         const yy = Math.floor(y);
         ctx.beginPath();
-        ctx.moveTo(0, yy - 3 * ratio);
-        ctx.lineTo(5 * ratio, yy);
-        ctx.lineTo(0, yy + 3 * ratio);
+        ctx.moveTo(0, yy - 4 * ratio);
+        ctx.lineTo(7 * ratio, yy);
+        ctx.lineTo(0, yy + 4 * ratio);
         ctx.closePath();
         ctx.fill();
       }
     }
 
-    // Playhead: a bright line with a glow so it reads over the played fill.
+    // Playhead: a white core with a primary halo, so it reads over both the played fill and the
+    // unplayed part (a primary line alone disappears into the played fill).
     if (windowDur > 0) {
       const y = Math.max(0, Math.min(pixelHeight - 1, playedRow));
       ctx.save();
       ctx.shadowColor = played;
-      ctx.shadowBlur = 4 * ratio;
-      ctx.fillStyle = played;
+      ctx.shadowBlur = 5 * ratio;
+      ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, y, pixelWidth, Math.max(1, Math.round(ratio)));
       ctx.restore();
     }
@@ -398,8 +410,8 @@ function DeckWaveform({
       aria-valuenow={Math.round(fraction * 100)}
       aria-disabled={disabled}
       title={windowDur > 0 && windowDur < durationSec
-        ? `Waveform ${formatTime(t0)} – ${formatTime(t1)} · click/drag to seek · Ctrl+scroll to zoom (shared by both decks) · double-click to fit`
-        : "Click or drag to seek · Ctrl+scroll to zoom (shared by both decks) · double-click to fit the whole track"}
+        ? `Waveform ${formatTime(t0)} – ${formatTime(t1)} · click/drag to seek · scroll or pinch to zoom (shared by both decks) · double-click to fit`
+        : "Click or drag to seek · scroll or pinch to zoom (shared by both decks) · double-click to fit the whole track"}
       className={cn(
         "relative select-none overflow-hidden rounded-xl bg-background/40",
         disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer",
@@ -407,18 +419,47 @@ function DeckWaveform({
       style={{ width: WAVEFORM_WIDTH, height: WAVEFORM_STRIP_HEIGHT, touchAction: "none" }}
       onPointerDown={(event) => {
         if (disabled) return;
-        draggingRef.current = true;
+        pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
         event.currentTarget.setPointerCapture(event.pointerId);
-        seekFromEvent(event);
+        if (pointersRef.current.size === 2) {
+          // A second finger turns the gesture into a pinch: stop seeking, start zooming.
+          draggingRef.current = false;
+          const [a, b] = [...pointersRef.current.values()];
+          pinchRef.current = {
+            startDist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+            startZoom: zoomRef.current,
+          };
+        } else if (pointersRef.current.size === 1) {
+          draggingRef.current = true;
+          seekFromEvent(event);
+        }
       }}
       onPointerMove={(event) => {
-        if (draggingRef.current && !disabled) seekFromEvent(event);
+        if (disabled) return;
+        const point = pointersRef.current.get(event.pointerId);
+        if (point) {
+          point.x = event.clientX;
+          point.y = event.clientY;
+        }
+        if (pinchRef.current && pointersRef.current.size >= 2) {
+          const [a, b] = [...pointersRef.current.values()];
+          const dist = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+          const pinch = pinchRef.current;
+          onZoomChangeRef.current(clampWaveformZoom(pinch.startZoom * (dist / pinch.startDist)));
+          pinch.startDist = dist;
+        } else if (draggingRef.current) {
+          seekFromEvent(event);
+        }
       }}
-      onPointerUp={() => {
-        draggingRef.current = false;
+      onPointerUp={(event) => {
+        pointersRef.current.delete(event.pointerId);
+        if (pointersRef.current.size < 2) pinchRef.current = null;
+        if (pointersRef.current.size === 0) draggingRef.current = false;
       }}
-      onPointerCancel={() => {
-        draggingRef.current = false;
+      onPointerCancel={(event) => {
+        pointersRef.current.delete(event.pointerId);
+        if (pointersRef.current.size < 2) pinchRef.current = null;
+        if (pointersRef.current.size === 0) draggingRef.current = false;
       }}
       onDoubleClick={() => onZoomChange(MIN_WAVEFORM_ZOOM)}
     >
@@ -456,7 +497,7 @@ function WaveformZoomControls({ zoom, onZoomChange }: { zoom: number; onZoomChan
         type="button"
         aria-label="Fit the whole track in the waveform"
         onClick={() => onZoomChange(MIN_WAVEFORM_ZOOM)}
-        className={cn(ZOOM_BUTTON, "w-9 tabular-nums")}
+        className={cn(ZOOM_BUTTON, "w-10 tabular-nums")}
       >
         {zoom <= MIN_WAVEFORM_ZOOM ? "FIT" : `×${formatZoom(zoom)}`}
       </button>
@@ -660,15 +701,16 @@ function Deck({
       </div>
 
       {/*
-        Cover art with the deck's vertical waveform beside it — the two decks sit side by side,
-        so their waveforms do too. The zoom controls under the strip drive the one zoom value both
-        decks share.
+        Cover art at one end of the deck, its vertical waveform strip at the far end: deck A keeps
+        the strip on the right, deck B mirrors it on the left, so the two strips stand beside each
+        other in the middle. The zoom controls under the strip drive the one zoom value both decks
+        share.
       */}
-      <div className="mb-4 flex items-center justify-center gap-3">
-        <div className="relative grid size-32 shrink-0 place-items-center overflow-hidden rounded-xl bg-muted shadow-lg">
+      <div className={cn("mb-4 flex items-center justify-between gap-3", side === "B" && "flex-row-reverse")}>
+        <div className="relative grid size-40 shrink-0 place-items-center overflow-hidden rounded-xl bg-muted shadow-lg">
           {track?.artworkUrl ? (
-            <TrackArtwork artworkUrl={track.artworkUrl} className="size-full" size={180} iconSize={30} />
-          ) : <MusicNoteIcon size={34} className="text-muted-foreground" />}
+            <TrackArtwork artworkUrl={track.artworkUrl} className="size-full" size={220} iconSize={34} />
+          ) : <MusicNoteIcon size={40} className="text-muted-foreground" />}
           <div className="pointer-events-none absolute inset-0 rounded-xl ring-1 ring-inset ring-white/10" />
         </div>
         <div className="flex flex-col items-center gap-1.5">
