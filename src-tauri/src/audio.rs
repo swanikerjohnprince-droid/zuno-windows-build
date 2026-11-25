@@ -1151,6 +1151,8 @@ impl Engine {
                 duration_sec: 0.0,
                 health: None,
                 tempo: 1.0,
+                keylock: false,
+                stretch: None,
                 position: None,
             },
             Deck {
@@ -1159,6 +1161,8 @@ impl Engine {
                 duration_sec: 0.0,
                 health: None,
                 tempo: 1.0,
+                keylock: false,
+                stretch: None,
                 position: None,
             },
         ];
