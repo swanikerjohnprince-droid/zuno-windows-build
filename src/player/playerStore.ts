@@ -72,6 +72,7 @@ type PlayerControllerMethod =
   | "resetAfterOutputChange"
   | "getTrackAnalysis"
   | "setDjDeckTempos"
+  | "setDjDeckKeylock"
   | "togglePlayPause"
   | "addToQueue"
   | "playNext"
@@ -214,6 +215,8 @@ class ActivePlayerController implements PlayerControllerActions {
     tabManager.getActivePlayer().seekCuedTrack(track, seconds);
   setDjDeckVolumes = (activeVolume: number, standbyVolume: number) =>
     tabManager.getActivePlayer().setDjDeckVolumes(activeVolume, standbyVolume);
+  setDjDeckKeylock = (activeKeylock: boolean, standbyKeylock: boolean) =>
+    tabManager.getActivePlayer().setDjDeckKeylock(activeKeylock, standbyKeylock);
   mixToTrack = (track: Track, fadeMs = 4000) => tabManager.getActivePlayer().mixToTrack(track, fadeMs);
 }
 

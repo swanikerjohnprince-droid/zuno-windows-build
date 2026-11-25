@@ -3248,6 +3248,24 @@ fn find_stream_buffer(track_id: &str) -> Option<(Arc<Mutex<MediaBuffer>>, String
     Some((weak.upgrade()?, mime_type.clone()))
 }
 
+/**
+ * Resolves a media-server URL (`{origin}/audio/{key}`) back to the in-process buffer it
+ * serves, when that item is still published. The server evicts its coldest entries beyond
+ * three, so a lookup can legitimately come back empty — callers treat that as "gone", not as
+ * a fault.
+ */
+fn find_media_buffer(url: &str) -> Option<(Arc<Mutex<MediaBuffer>>, String)> {
+    let parsed = url::Url::parse(url).ok()?;
+    let key = parsed.path().strip_prefix("/audio/")?;
+    if key.is_empty() || key.contains('/') {
+        return None;
+    }
+    let server = MEDIA_SERVER.get()?;
+    let items = server.items.lock().ok()?;
+    let item = items.get(key)?;
+    Some((Arc::clone(&item.buffer), item.mime_type.clone()))
+}
+
 /// True once a fill's slot has moved on to a newer load. `None` opts out, for the media-server
 /// (`<audio>`) path, which has no load slots to be superseded in.
 fn load_superseded(slot: Option<(usize, u64)>) -> bool {
@@ -4104,6 +4122,18 @@ enum NativeAudioSource {
     /// A file the user pointed at a music folder.
     #[serde(rename_all = "camelCase")]
     File { path: String },
+    ///
+    /// A URL the app's own media server already serves from an in-process buffer
+    /// (`{origin}/audio/{key}`, published by `fetch_audio_source`). Sources like shemen have
+    /// no signed googlevideo URL, so there is nothing to range-fetch: the fill is already
+    /// running (or the body already complete) behind that URL, and this resolves back to the
+    /// same buffer instead of downloading a second copy.
+    #[serde(rename_all = "camelCase")]
+    Media {
+        url: String,
+        mime_type: String,
+        byte_length: usize,
+    },
 }
 
 /**
@@ -4186,6 +4216,36 @@ fn open_native_audio_reader(
                 mime_type: sniffed_mime(&mut file, declared, label),
                 reader: Box::new(file),
                 buffer: None,
+            })
+        }
+        NativeAudioSource::Media {
+            url,
+            mime_type: _,
+            byte_length,
+        } => {
+            let (buffer, mime_type) = find_media_buffer(&url).ok_or_else(|| {
+                cache_error("media source is no longer published by the media server")
+            })?;
+            // The served size is what the buffer was planned with; a mismatch means the URL
+            // points at a different body than the frontend resolved, which the decoder will
+            // report confusingly later — say it now.
+            if let Ok(guard) = buffer.lock() {
+                if byte_length > 0 && guard.total != byte_length {
+                    eprintln!(
+                        "[internal][tauri][warn] media source size drifted: declared {byte_length}, buffer holds {}",
+                        guard.total
+                    );
+                }
+            }
+            // Register under the track id too, so a waveform asked for with `null` source
+            // finds this same buffer through `find_stream_buffer`.
+            let slot_index = standby as usize;
+            LOAD_GENERATION[slot_index].fetch_add(1, Ordering::SeqCst);
+            register_stream_buffer(track_id, &buffer, &mime_type);
+            Ok(NativeAudioReader {
+                reader: Box::new(audio::BufferReader::new(Arc::clone(&buffer))),
+                mime_type,
+                buffer: Some(buffer),
             })
         }
     }
@@ -4400,6 +4460,30 @@ struct TrackAnalysis {
  * provider metadata can be off by seconds, so the bucket boundaries come from how many frames
  * were actually decoded instead (see `analyse_audio`).
  */
+/// What `native_audio_waveform` decodes from: a file on disk, or a shared in-process buffer.
+enum WaveformInput {
+    Disk(PathBuf, String),
+    Stream(Arc<Mutex<MediaBuffer>>, String),
+}
+
+/**
+ * Waits for a track's deck buffer to appear in `STREAM_BUFFERS`, for a source that named no
+ * bytes of its own (`null`) or a media URL whose item was since evicted. Gives up after a
+ * few seconds — the caller retries once the track is actually loaded.
+ */
+async fn wait_for_track_stream_buffer(track_id: &str) -> Result<WaveformInput, CommandError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        if let Some((buffer, mime_type)) = find_stream_buffer(track_id) {
+            return Ok(WaveformInput::Stream(buffer, mime_type));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(cache_error("waveform: track is not loaded yet."));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+}
+
 #[tauri::command]
 async fn native_audio_waveform(
     app: tauri::AppHandle,
@@ -4407,15 +4491,10 @@ async fn native_audio_waveform(
     source: Option<NativeAudioSource>,
     buckets: usize,
 ) -> Result<TrackAnalysis, CommandError> {
-    enum Input {
-        Disk(PathBuf, String),
-        Stream(Arc<Mutex<MediaBuffer>>, String),
-    }
-
     let buckets = buckets.clamp(8, 4096);
     let input = match source {
         Some(NativeAudioSource::Offline { track_id, mime_type }) => {
-            Input::Disk(offline_entry_path(&app, &track_id)?, mime_type)
+            WaveformInput::Disk(offline_entry_path(&app, &track_id)?, mime_type)
         }
         Some(NativeAudioSource::File { path }) => {
             let path = PathBuf::from(path);
@@ -4425,19 +4504,16 @@ async fn native_audio_waveform(
                 return Err(cache_error("local audio file is unavailable."));
             }
             let declared = local_audio_mime_type(&path).to_string();
-            Input::Disk(path, declared)
+            WaveformInput::Disk(path, declared)
         }
+        Some(NativeAudioSource::Media { url, .. }) => match find_media_buffer(&url) {
+            Some((buffer, mime_type)) => WaveformInput::Stream(buffer, mime_type),
+            // The media item was evicted; the track-id lookup still finds the buffer when
+            // the same track was loaded onto a deck, which registers it under its id.
+            None => wait_for_track_stream_buffer(&track_id).await?,
+        },
         Some(NativeAudioSource::Stream { .. }) | None => {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-            loop {
-                if let Some((buffer, mime_type)) = find_stream_buffer(&track_id) {
-                    break Input::Stream(buffer, mime_type);
-                }
-                if std::time::Instant::now() >= deadline {
-                    return Err(cache_error("waveform: track is not loaded yet."));
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            }
+            wait_for_track_stream_buffer(&track_id).await?
         }
     };
 
@@ -4447,7 +4523,7 @@ async fn native_audio_waveform(
             String,
             Option<Arc<Mutex<MediaBuffer>>>,
         ) = match input {
-            Input::Disk(path, declared) => {
+            WaveformInput::Disk(path, declared) => {
                 let mut probe = File::open(&path)
                     .map_err(|error| cache_error(format!("waveform read failed: {error}")))?;
                 let label = path.file_name().and_then(|name| name.to_str()).unwrap_or("file");
@@ -4458,7 +4534,7 @@ async fn native_audio_waveform(
                     None,
                 )
             }
-            Input::Stream(buffer, mime_type) => (
+            WaveformInput::Stream(buffer, mime_type) => (
                 Box::new(audio::BufferReader::new(Arc::clone(&buffer)))
                     as Box<dyn symphonia::core::io::MediaSource>,
                 mime_type,
@@ -5951,6 +6027,15 @@ mod tests {
         )
         .expect("file source");
         assert!(matches!(file, NativeAudioSource::File { path } if path.ends_with("song.flac")));
+
+        // A media source is the loopback URL the media server handed back, not a remote one.
+        let media = serde_json::from_str::<NativeAudioSource>(
+            r#"{"kind":"media","url":"http://127.0.0.1:41234/audio/stream-abc","mimeType":"audio/mpeg","byteLength":1234567}"#,
+        )
+        .expect("media source");
+        assert!(
+            matches!(media, NativeAudioSource::Media { url, byte_length } if url.ends_with("/audio/stream-abc") && byte_length == 1234567)
+        );
 
         // snake_case is what the bug accepted; it must not be what the contract accepts.
         assert!(

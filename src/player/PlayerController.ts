@@ -1597,12 +1597,6 @@ export class PlayerController {
    */
   async getTrackAnalysis(track: Track, buckets: number): Promise<rustAudio.TrackAnalysis | null> {
     if (!this.audioEngine.usesRustAudio()) return null;
-    /*
-     * Shemen audio reaches Rust only through the media server on demand; there is no
-     * Rust-side source reference to analyse, and waiting on a stream buffer would stall
-     * the waveform for the whole 8s timeout.
-     */
-    if (track.source === "shemen") return null;
     const key = `${track.id}:${buckets}`;
     const cached = this.waveformCache.get(key);
     if (cached) return cached;
@@ -1614,6 +1608,15 @@ export class PlayerController {
       source = { kind: "file", path: track.localPath };
     } else if (isTrackDownloaded(track.id)) {
       source = { kind: "offline", trackId: track.id, mimeType: track.mimeType ?? "audio/mp4" };
+    } else if (track.source === "shemen") {
+      /*
+       * Shemen audio is published to the media server by `getStreamData`; its `media`
+       * reference resolves to that in-process buffer on the Rust side, so analysis decodes
+       * the same bytes playback uses instead of waiting on a deck buffer that never comes.
+       */
+      const data = this.dataSource.getStreamData ? await this.dataSource.getStreamData(track) : null;
+      source = data?.rustSource ?? null;
+      if (!source) return null;
     }
 
     const job = rustAudio
@@ -1652,6 +1655,11 @@ export class PlayerController {
   /** Sets the active/standby deck tempos from the DJ pitch faders (multipliers, 1 = unchanged). */
   async setDjDeckTempos(activeTempo: number, standbyTempo: number): Promise<void> {
     await this.audioEngine.setDeckTempos(activeTempo, standbyTempo);
+  }
+
+  /** Turns keylock (pitch-preserving tempo) on or off for the active/standby decks. */
+  async setDjDeckKeylock(activeKeylock: boolean, standbyKeylock: boolean): Promise<void> {
+    await this.audioEngine.setDeckKeylock(activeKeylock, standbyKeylock);
   }
 
   getCuedDuration(track: Track): number {

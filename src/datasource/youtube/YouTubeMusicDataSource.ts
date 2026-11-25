@@ -451,6 +451,11 @@ export class YouTubeMusicDataSource extends DataSource {
   private readonly suggestionRefreshPromises = new Map<string, Promise<string[]>>();
   private readonly recommendationRefreshPromises = new Map<string, Promise<Track[]>>();
   private readonly lyricsRefreshPromises = new Map<string, Promise<Lyrics>>();
+  /**
+   * Shemen `getStreamData` results per track: the download through the media server is the
+   * expensive step, and DJ Mode asks again for cueing and analysis of the same track.
+   */
+  private readonly shemenStreamData = new Map<string, StreamData>();
   private readonly artistSubscriptionOverrides = new Map<string, { subscribed: boolean; expiresAt: number }>();
 
   constructor() {
@@ -6210,6 +6215,8 @@ export class YouTubeMusicDataSource extends DataSource {
      * plays on every engine mode.
      */
     if (track.source === "shemen") {
+      const cached = this.shemenStreamData.get(track.id);
+      if (cached) return cached;
       const payload = await invoke<NativeAudioSourcePayload>("fetch_audio_source", {
         url: shemenDownloadUrl(track.id),
         trackId: track.id,
@@ -6223,7 +6230,23 @@ export class YouTubeMusicDataSource extends DataSource {
         byteLength: payload.byteLength,
         sourceUrl: payload.url,
       });
-      return { mimeType: payload.mimeType, sourceUrl: payload.url };
+      const data: StreamData = { mimeType: payload.mimeType, sourceUrl: payload.url };
+      if (usesRustAudioEngine()) {
+        /*
+         * On the Rust engine, point at the same media-server buffer instead of re-downloading:
+         * `fetch_audio_source` has already published (and, for a shemen-sized body, completed)
+         * it, and the `media` reference resolves back to that in-process buffer on the Rust
+         * side — which is what makes shemen tracks analysable and cueable on a deck.
+         */
+        data.rustSource = {
+          kind: "media",
+          url: payload.url,
+          mimeType: payload.mimeType,
+          byteLength: payload.byteLength,
+        };
+      }
+      this.shemenStreamData.set(track.id, data);
+      return data;
     }
 
     if (usesRustAudioEngine()) {
