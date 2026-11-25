@@ -5,6 +5,7 @@ import {
   CheckIcon,
   ClockIcon,
   DiceIcon,
+  ListIcon,
   PauseIcon,
   PlaylistAddIcon,
   ShuffleActiveIcon,
@@ -23,8 +24,10 @@ import {
 } from "../../../player/playerStore";
 import type { PlayerSession } from "../../../player/PlayerController";
 import {
+  setQueuePanelView,
   toggleQueuePanelCollapsed,
   useQueuePanelCollapsed,
+  useQueuePanelView,
 } from "../../settings/queuePanel";
 import { ArtistLinks } from "../ArtistLinks";
 import { TrackArtwork } from "../TrackArtwork";
@@ -257,14 +260,101 @@ const QueueRow = memo(function QueueRow({
   );
 });
 
+/**
+ * One row of the played-from-queue history, newest first.
+ *
+ * Simpler than QueueRow on purpose: history rows are not reorderable and have no stop marker,
+ * so they get the plain cover/title treatment with a click-to-replay. Memoised for the same
+ * reason as QueueRow — the panel re-renders on every player emit.
+ */
+const HistoryRow = memo(function HistoryRow({
+  track,
+  collapsed,
+  isCurrent,
+  isPlaying,
+  onPlay,
+}: {
+  track: Track;
+  collapsed: boolean;
+  isCurrent: boolean;
+  isPlaying: boolean;
+  onPlay: () => void;
+}) {
+  const row = (
+    <div className={cn(
+      "group/queue-item relative flex items-center rounded transition-colors hover:bg-card",
+      collapsed ? "justify-center" : "gap-1",
+    )}
+    >
+      <button
+        type="button"
+        className={cn(
+          "flex min-w-0 items-center rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          collapsed ? "p-1.5" : "flex-1 gap-2.5 p-1.5",
+        )}
+        onClick={onPlay}
+        aria-label={collapsed ? `Play ${track.title}` : undefined}
+      >
+        <span className="relative shrink-0">
+          <TrackArtwork
+            className={cn("rounded", isCurrent && "ring-1 ring-primary/60", collapsed ? "size-11" : "size-10")}
+            size={collapsed ? 44 : 40}
+            artworkUrl={track.artworkUrl}
+            iconSize={collapsed ? 20 : 18}
+          />
+          {isCurrent && isPlaying && (
+            <span
+              className="absolute inset-0 grid place-items-center rounded bg-background/60 backdrop-blur-[2px]"
+              aria-hidden="true"
+            >
+              <MusicVisualizer
+                bars={4}
+                className="[--music-gap:2px] [--music-height:16px] [--music-width:20px]"
+              />
+            </span>
+          )}
+        </span>
+
+        {!collapsed && (
+          <span className="flex min-w-0 flex-col">
+            <span className="truncate text-sm text-foreground">{track.title}</span>
+            <ArtistLinks
+              className="truncate text-xs text-muted-foreground"
+              artists={track.artists}
+              fallback={track.artist}
+            />
+          </span>
+        )}
+      </button>
+    </div>
+  );
+
+  if (!collapsed) return row;
+  return (
+    <Tooltip
+      side="left"
+      content={
+        <span className="flex flex-col">
+          <span className="font-medium">{track.title}</span>
+          <span className="text-muted-foreground">{track.artist}</span>
+        </span>
+      }
+    >
+      {row}
+    </Tooltip>
+  );
+});
+
 const EMPTY_QUEUE: Track[] = [];
+const EMPTY_HISTORY: Track[] = [];
 
 /*
- * `exportSession()` rebuilds the queue window with `.slice()` on every player emit — including
- * ones that never touch the queue, like a volume drag firing dozens of times a gesture — so a
- * plain read of `session.queue` gets a new array identity far more often than the queue itself
- * changes. Comparing by track identity (not the wrapping array) is what lets
- * `usePlayerSessionSelector` hand back the previous, still-equal snapshot on those emits.
+ * `exportSession()` rebuilds the queue window and the history slice with `.slice()` on every
+ * player emit — including ones that never touch either, like a volume drag firing dozens of
+ * times a gesture — so a plain read of `session.queue` gets a new array identity far more
+ * often than the queue itself changes. Comparing by track identity (not the wrapping array)
+ * is what lets `usePlayerSessionSelector` hand back the previous, still-equal snapshot on
+ * those emits.
  */
 function selectQueueSlice(session: PlayerSession | null) {
   return {
@@ -273,7 +363,12 @@ function selectQueueSlice(session: PlayerSession | null) {
     manualQueueLength: session?.manualQueueLength ?? 0,
     stopAfterQueueIndex: session?.stopAfterQueueIndex ?? null,
     queueWindowStart: session?.queueWindowStart ?? 0,
+    history: session?.history ?? EMPTY_HISTORY,
   };
+}
+
+function sameTrackList(a: Track[], b: Track[]) {
+  return a.length === b.length && a.every((track, index) => track === b[index]);
 }
 
 function queueSliceEqual(
@@ -284,8 +379,8 @@ function queueSliceEqual(
     && a.manualQueueLength === b.manualQueueLength
     && a.stopAfterQueueIndex === b.stopAfterQueueIndex
     && a.queueWindowStart === b.queueWindowStart
-    && a.queue.length === b.queue.length
-    && a.queue.every((track, index) => track === b.queue[index]);
+    && sameTrackList(a.queue, b.queue)
+    && sameTrackList(a.history, b.history);
 }
 
 /**
@@ -355,7 +450,8 @@ export function QueuePanel({ onClose }: QueuePanelProps) {
   dropTargetRef.current = dropTarget;
 
   const collapsed = useQueuePanelCollapsed();
-  const { queue, queueIndex, manualQueueLength, stopAfterQueueIndex, queueWindowStart } =
+  const view = useQueuePanelView();
+  const { queue, queueIndex, manualQueueLength, stopAfterQueueIndex, queueWindowStart, history } =
     usePlayerSessionSelector(selectQueueSlice, queueSliceEqual);
   // `stopAfterQueueIndex` comes off the session window-relative, like `queueIndex`; rebased once
   // here so every comparison against `entry.absoluteIndex` (already absolute) lines up.
@@ -434,20 +530,25 @@ export function QueuePanel({ onClose }: QueuePanelProps) {
   };
 
   /*
-   * Saves what is *upcoming* plus the track playing now — the queue as you see it. Tracks
-   * already behind the playhead are history, and silently including them would produce a
-   * playlist that does not match the panel it was made from.
+   * Saves whichever view is showing: the queue view saves what is *upcoming* plus the track
+   * playing now — the queue as you see it — while the history view saves what the queue has
+   * already played. Silently mixing the two would produce a playlist that does not match the
+   * panel it was made from.
    */
-  const handleSaveQueue = async () => {
+  const handleSave = async () => {
     if (saveDraft === null || saveState === "saving") return;
     const title = saveDraft.trim();
     if (!title) return;
 
-    const trackIds = [
-      ...(currentTrack ? [currentTrack.id] : []),
-      ...manual.map((entry) => entry.track.id),
-      ...automatic.map((entry) => entry.track.id),
-    ].filter((id) => !id.startsWith("local:"));
+    const trackIds = (
+      view === "history"
+        ? history.map((track) => track.id)
+        : [
+            ...(currentTrack ? [currentTrack.id] : []),
+            ...manual.map((entry) => entry.track.id),
+            ...automatic.map((entry) => entry.track.id),
+          ]
+    ).filter((id) => !id.startsWith("local:"));
 
     setSaveState("saving");
     try {
@@ -456,9 +557,17 @@ export function QueuePanel({ onClose }: QueuePanelProps) {
       setSaveState("saved");
       window.setTimeout(() => setSaveState("idle"), 2000);
     } catch (error) {
-      logInternalError("QueuePanel.saveQueueAsPlaylist failed", error);
+      logInternalError("QueuePanel.saveAsPlaylist failed", error);
       setSaveState("idle");
     }
+  };
+
+  const openSaveDraft = () =>
+    setSaveDraft((draft) => (draft === null ? (view === "history" ? "My history" : "My queue") : null));
+
+  const switchView = () => {
+    setSaveDraft(null);
+    setQueuePanelView(view === "queue" ? "history" : "queue");
   };
 
   const handleStopAfter = (absoluteIndex: number) => {
@@ -662,7 +771,7 @@ export function QueuePanel({ onClose }: QueuePanelProps) {
         // Dragging over rows must not select their text.
         draggedIndex !== null && "select-none",
       )}
-      aria-label="Queue"
+      aria-label={view === "history" ? "Play history" : "Queue"}
     >
       <header
         className={cn(
@@ -684,22 +793,57 @@ export function QueuePanel({ onClose }: QueuePanelProps) {
           </button>
         </Tooltip>
 
+        {/* Switches the panel between the upcoming queue and what the queue has already
+            played. Available collapsed too — it is an icon either way. */}
+        <Tooltip
+          side={collapsed ? "left" : "bottom"}
+          content={view === "queue" ? "Show play history" : "Show the queue"}
+        >
+          <button
+            type="button"
+            className={cn(ICON_BUTTON, view === "history" && "text-primary")}
+            onClick={switchView}
+            aria-pressed={view === "history"}
+          >
+            {view === "queue" ? (
+              <ClockIcon size={16} aria-hidden="true" />
+            ) : (
+              <ListIcon size={16} aria-hidden="true" />
+            )}
+            <span className="sr-only">
+              {view === "queue" ? "Show play history" : "Show the queue"}
+            </span>
+          </button>
+        </Tooltip>
+
         {!collapsed && (
           <div className="flex min-w-0 flex-1 flex-col">
-            <h2 className="text-sm font-semibold text-foreground">Up next</h2>
+            <h2 className="text-sm font-semibold text-foreground">
+              {view === "queue" ? "Up next" : "History"}
+            </h2>
             <p className="flex items-center gap-1 truncate text-[11px] text-muted-foreground">
-              <span>{upcomingCount === 0 ? "Nothing queued" : `${upcomingCount} songs`}</span>
-              {remaining && (
+              {view === "queue" ? (
                 <>
-                  <ClockIcon size={11} aria-hidden="true" />
-                  <span>{remaining}</span>
+                  <span>{upcomingCount === 0 ? "Nothing queued" : `${upcomingCount} songs`}</span>
+                  {remaining && (
+                    <>
+                      <ClockIcon size={11} aria-hidden="true" />
+                      <span>{remaining}</span>
+                    </>
+                  )}
                 </>
+              ) : (
+                <span>
+                  {history.length === 0
+                    ? "Nothing played yet"
+                    : `${history.length} ${history.length === 1 ? "play" : "plays"}`}
+                </span>
               )}
             </p>
           </div>
         )}
 
-        {!collapsed && upcomingCount > 0 && (
+        {!collapsed && view === "queue" && upcomingCount > 0 && (
           <>
             <Tooltip content="Shuffle what's next">
               <button
@@ -721,38 +865,46 @@ export function QueuePanel({ onClose }: QueuePanelProps) {
                 <span className="sr-only">Shuffle the whole playlist</span>
               </button>
             </Tooltip>
-            <Tooltip content="Save the queue as a playlist">
-              <button
-                type="button"
-                className={cn(ICON_BUTTON, saveState === "saved" && "text-primary")}
-                onClick={() => setSaveDraft((draft) => (draft === null ? "My queue" : null))}
-                aria-expanded={saveDraft !== null}
-              >
-                {saveState === "saving" ? (
-                  <Loader variant="spinner" size={15} />
-                ) : saveState === "saved" ? (
-                  <CheckIcon size={16} aria-hidden="true" />
-                ) : (
-                  <PlaylistAddIcon size={16} aria-hidden="true" />
-                )}
-                <span className="sr-only">Save the queue as a playlist</span>
-              </button>
-            </Tooltip>
-            <Tooltip content="Clear the queue">
-              <button
-                type="button"
-                className={cn(ICON_BUTTON, "hover:text-primary")}
-                onClick={() => playerController.clearUpcomingQueue()}
-              >
-                <TrashIcon size={16} aria-hidden="true" />
-                <span className="sr-only">Clear the queue</span>
-              </button>
-            </Tooltip>
           </>
+        )}
+        {!collapsed && (view === "queue" ? upcomingCount > 0 : history.length > 0) && (
+          <Tooltip
+            content={view === "history" ? "Save history as a playlist" : "Save the queue as a playlist"}
+          >
+            <button
+              type="button"
+              className={cn(ICON_BUTTON, saveState === "saved" && "text-primary")}
+              onClick={openSaveDraft}
+              aria-expanded={saveDraft !== null}
+            >
+              {saveState === "saving" ? (
+                <Loader variant="spinner" size={15} />
+              ) : saveState === "saved" ? (
+                <CheckIcon size={16} aria-hidden="true" />
+              ) : (
+                <PlaylistAddIcon size={16} aria-hidden="true" />
+              )}
+              <span className="sr-only">
+                {view === "history" ? "Save history as a playlist" : "Save the queue as a playlist"}
+              </span>
+            </button>
+          </Tooltip>
+        )}
+        {!collapsed && view === "queue" && upcomingCount > 0 && (
+          <Tooltip content="Clear the queue">
+            <button
+              type="button"
+              className={cn(ICON_BUTTON, "hover:text-primary")}
+              onClick={() => playerController.clearUpcomingQueue()}
+            >
+              <TrashIcon size={16} aria-hidden="true" />
+              <span className="sr-only">Clear the queue</span>
+            </button>
+          </Tooltip>
         )}
       </header>
 
-      {/* Opens under the header so the queue it is about stays in view. */}
+      {/* Opens under the header so the list it is about stays in view. */}
       {!collapsed && saveDraft !== null && (
         <div className="mx-2 mb-1 flex shrink-0 flex-col gap-2 rounded-xl bg-card p-2">
           <input
@@ -760,7 +912,7 @@ export function QueuePanel({ onClose }: QueuePanelProps) {
             value={saveDraft}
             onChange={(event) => setSaveDraft(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter") void handleSaveQueue();
+              if (event.key === "Enter") void handleSave();
               if (event.key === "Escape") setSaveDraft(null);
             }}
             aria-label="New playlist name"
@@ -768,7 +920,9 @@ export function QueuePanel({ onClose }: QueuePanelProps) {
           />
           <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] text-muted-foreground">
-              {upcomingCount + (currentTrack ? 1 : 0)} songs
+              {view === "history"
+                ? `${history.length} ${history.length === 1 ? "song" : "songs"}`
+                : `${upcomingCount + (currentTrack ? 1 : 0)} songs`}
             </span>
             <div className="flex gap-1.5">
               <button
@@ -782,7 +936,7 @@ export function QueuePanel({ onClose }: QueuePanelProps) {
                 type="button"
                 disabled={saveState === "saving" || !saveDraft.trim()}
                 className="rounded-full bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground transition-transform hover:scale-[1.02] active:scale-95 disabled:pointer-events-none disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                onClick={() => void handleSaveQueue()}
+                onClick={() => void handleSave()}
               >
                 {saveState === "saving" ? "Saving..." : "Save"}
               </button>
@@ -849,7 +1003,36 @@ export function QueuePanel({ onClose }: QueuePanelProps) {
         </div>
       )}
 
-      {upcomingCount === 0 ? (
+      {view === "history" ? (
+        history.length === 0 ? (
+          collapsed ? null : (
+            <p className="px-3 py-8 text-center text-sm text-muted-foreground">
+              Nothing played yet. Songs the queue finishes land here.
+            </p>
+          )
+        ) : (
+          <div className={cn("flex flex-col gap-0.5 pb-2", collapsed ? "px-1.5" : "px-2")}>
+            {/* Newest first; `history` itself is oldest-first, load-bearing for skip-back. */}
+            {[...history].reverse().map((track, displayIndex) => (
+              <HistoryRow
+                key={`${track.id}:${displayIndex}`}
+                track={track}
+                collapsed={collapsed}
+                isCurrent={currentTrack?.id === track.id}
+                isPlaying={isPlaying && currentTrack?.id === track.id}
+                onPlay={() =>
+                  // Replaying a past track queues what actually followed it, so playback
+                  // keeps going the way it did then.
+                  void playerController.playTrackById(
+                    track.id,
+                    history.slice(history.length - displayIndex),
+                  )
+                }
+              />
+            ))}
+          </div>
+        )
+      ) : upcomingCount === 0 ? (
         collapsed ? null : (
           <p className="px-3 py-8 text-center text-sm text-muted-foreground">
             Nothing queued. Songs you add with "Play next" land here.

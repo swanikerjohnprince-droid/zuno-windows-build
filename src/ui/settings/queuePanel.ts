@@ -1,8 +1,11 @@
 import { useSyncExternalStore } from "react";
 import {
   hydrateLocalBooleanSetting,
+  hydrateLocalJsonSetting,
   readLocalBooleanSetting,
+  readLocalJsonSetting,
   writeLocalBooleanSetting,
+  writeLocalJsonSetting,
 } from "../../internal/durableLocalSetting";
 
 /**
@@ -38,8 +41,35 @@ export function toggleQueuePanelCollapsed() {
 
 export async function hydrateQueuePanelSettings() {
   await hydrateLocalBooleanSetting(QUEUE_PANEL_COLLAPSED_STORAGE_KEY, true, CHANGE_EVENT);
+  await hydrateLocalJsonSetting(QUEUE_PANEL_VIEW_STORAGE_KEY, isQueuePanelView);
+  window.dispatchEvent(new Event(CHANGE_EVENT));
 }
 
 export function useQueuePanelCollapsed() {
   return useSyncExternalStore(subscribe, readQueuePanelCollapsed, () => true);
+}
+
+/**
+ * The panel shows either the upcoming queue or the history of what the queue has already
+ * played (`PlayerSession.history`). Which one is a glance, not a navigation, so it persists.
+ */
+export type QueuePanelView = "queue" | "history";
+
+const QUEUE_PANEL_VIEW_STORAGE_KEY = "queue-panel-view";
+
+function isQueuePanelView(value: unknown): value is QueuePanelView {
+  return value === "queue" || value === "history";
+}
+
+function readQueuePanelView(): QueuePanelView {
+  return readLocalJsonSetting(QUEUE_PANEL_VIEW_STORAGE_KEY, isQueuePanelView) ?? "queue";
+}
+
+export function setQueuePanelView(view: QueuePanelView) {
+  writeLocalJsonSetting(QUEUE_PANEL_VIEW_STORAGE_KEY, view);
+  window.dispatchEvent(new Event(CHANGE_EVENT));
+}
+
+export function useQueuePanelView() {
+  return useSyncExternalStore(subscribe, readQueuePanelView, () => "queue" as QueuePanelView);
 }
