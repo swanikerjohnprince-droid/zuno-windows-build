@@ -1654,11 +1654,6 @@ export class PlayerController {
     await this.audioEngine.setDeckTempos(activeTempo, standbyTempo);
   }
 
-  /** Turns keylock (pitch-preserving tempo) on or off for the active/standby decks. */
-  async setDjDeckKeylock(activeKeylock: boolean, standbyKeylock: boolean): Promise<void> {
-    await this.audioEngine.setDeckKeylock(activeKeylock, standbyKeylock);
-  }
-
   getCuedDuration(track: Track): number {
     return this.audioEngine.getPreloadedDuration(track.id) || track.durationSec || 0;
   }

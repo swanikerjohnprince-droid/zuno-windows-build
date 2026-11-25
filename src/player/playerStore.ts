@@ -72,7 +72,6 @@ type PlayerControllerMethod =
   | "resetAfterOutputChange"
   | "getTrackAnalysis"
   | "setDjDeckTempos"
-  | "setDjDeckKeylock"
   | "togglePlayPause"
   | "addToQueue"
   | "playNext"
@@ -139,7 +138,6 @@ class ActivePlayerController implements PlayerControllerActions {
   resetAfterOutputChange = () => tabManager.getActivePlayer().resetAfterOutputChange();
   getTrackAnalysis = (track: Track, buckets: number) => tabManager.getActivePlayer().getTrackAnalysis(track, buckets);
   setDjDeckTempos = (activeTempo: number, standbyTempo: number) => tabManager.getActivePlayer().setDjDeckTempos(activeTempo, standbyTempo);
-  setDjDeckKeylock = (activeKeylock: boolean, standbyKeylock: boolean) => tabManager.getActivePlayer().setDjDeckKeylock(activeKeylock, standbyKeylock);
   togglePlayPause = () => tabManager.getActivePlayer().togglePlayPause();
   addToQueue = (track: Parameters<PlayerController["addToQueue"]>[0]) =>
     tabManager.getActivePlayer().addToQueue(track);
