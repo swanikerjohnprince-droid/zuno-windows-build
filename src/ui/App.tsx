@@ -133,6 +133,28 @@ import { useLastFmScrobblingEnabled } from "./settings/lastfm";
 import { persistMainWindowGeometry } from "./settings/mainWindowGeometry";
 import { hydratePlaybackSettings } from "../player/playbackSettings";
 const restoredSession = loadAppSession();
+
+/**
+ * Files and Shemen are app-level destinations, so every launch opens them next to whatever tabs
+ * the saved session restores; the persist effect then carries them forward like any other tab.
+ */
+function withLaunchTabs(tabs: Tab[], nextTabId: number): { tabs: Tab[]; nextTabId: number } {
+  const result = [...tabs];
+  let id = nextTabId;
+  if (!result.some((tab) => tab.view === "files")) {
+    result.push({ id: String(id++), view: "files", title: "Files" });
+  }
+  if (!result.some((tab) => tab.view === "shemen")) {
+    result.push({ id: String(id++), view: "shemen", title: "Shemen" });
+  }
+  return { tabs: result, nextTabId: id };
+}
+
+const initialTabState = withLaunchTabs(
+  restoredSession?.tabs.map(stripNavigationHistory) ?? [{ id: "1", view: "home" }],
+  restoredSession?.nextTabId ?? 2,
+);
+
 const LOADING_SCREEN_FADE_MS = 80;
 const LOADING_SCREEN_MAX_MS = 4000;
 const ONBOARDING_COMPLETE_KEY = "yt-music-dock:onboarding-complete";
@@ -459,15 +481,11 @@ export default function App() {
       });
   }, [playerUIState.isLyricsFullscreen]);
 
-  const [tabs, setTabs] = useState<Tab[]>(
-    () => restoredSession?.tabs.map(stripNavigationHistory) ?? [{ id: "1", view: "home" }],
-  );
+  const [tabs, setTabs] = useState<Tab[]>(() => initialTabState.tabs);
   const [activeTabId, setActiveTabId] = useState(
     () => restoredSession?.activeTabId ?? "1",
   );
-  const [nextTabId, setNextTabId] = useState(
-    () => restoredSession?.nextTabId ?? 2,
-  );
+  const [nextTabId, setNextTabId] = useState(() => initialTabState.nextTabId);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   /*
    * The sidebar is a fixed icon rail. 72px sits below the Sidebar's own text-hide threshold,
