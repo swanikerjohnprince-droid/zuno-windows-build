@@ -176,6 +176,7 @@ function DeckWaveform({
   status,
   positionSec,
   getPositionSec,
+  playing,
   durationSec,
   disabled,
   grid,
@@ -189,6 +190,8 @@ function DeckWaveform({
   positionSec: number;
   /** Live clock from the audio engine, sampled per animation frame while zoomed in. */
   getPositionSec?: () => number;
+  /** Whether the deck is actually playing right now (decides whether the live clock is extrapolated). */
+  playing: boolean;
   durationSec: number;
   disabled: boolean;
   /** Beat grid in track time, or null when there is no tempo to draw. */
@@ -215,6 +218,21 @@ function DeckWaveform({
   getPositionSecRef.current = getPositionSec;
   const positionRef = useRef(positionSec);
   positionRef.current = positionSec;
+  const playingRef = useRef(playing);
+  playingRef.current = playing;
+  const durationRef = useRef(durationSec);
+  durationRef.current = durationSec;
+  /*
+   * The Rust engine pushes position over IPC every 250 ms, so sampling its getter per frame
+   * steps the playhead at 4 Hz — visibly choppy when fully zoomed in. While playing, estimate
+   * the position between pushes instead: whenever the raw value changes, re-derive the playback
+   * rate from the jump and extrapolate from there, clamped to the track. A paused deck keeps the
+   * raw value exactly.
+   */
+  const clockRef = useRef({ value: positionSec, at: 0, rate: 1 });
+  useEffect(() => {
+    clockRef.current = { value: positionRef.current, at: performance.now(), rate: 1 };
+  }, [durationSec]);
 
   // While zoomed in, the visible window follows the playhead, so the strip has to scroll at
   // display frame rate — the parent's 100 ms display clock would step it at 10 Hz. Sample the
@@ -226,8 +244,21 @@ function DeckWaveform({
     if (!zoomed) return;
     let raf = 0;
     const loop = () => {
+      const now = performance.now();
+      const raw = getPositionSecRef.current?.() ?? positionRef.current;
+      const clock = clockRef.current;
+      if (raw !== clock.value) {
+        const dt = (now - clock.at) / 1000;
+        // Only re-derive the rate from a meaningful interval — a 250 ms push is, a seek glitch isn't.
+        const rate = dt > 0.05 ? Math.min(8, Math.max(0, (raw - clock.value) / dt)) : clock.rate;
+        clockRef.current = { value: raw, at: now, rate };
+      }
+      const c = clockRef.current;
+      const est = playingRef.current
+        ? Math.max(0, Math.min(durationRef.current, c.value + ((now - c.at) / 1000) * c.rate))
+        : c.value;
       // Same value → React bails out of the re-render, so a paused deck costs nothing.
-      setLivePosition(getPositionSecRef.current?.() ?? positionRef.current);
+      setLivePosition(est);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -602,6 +633,16 @@ function TempoPanel({ side, view, actions }: { side: "A" | "B"; view: DeckTempoV
         >
           SYNC
         </button>
+        <button
+          type="button"
+          onClick={actions.onKeylock}
+          title={view.keylock
+            ? "Keylock on: the tempo fader keeps the pitch. Click to let the pitch move with speed"
+            : "Keylock off: the tempo fader changes pitch with speed, like a turntable. Click to keep the pitch"}
+          className={cn(TEMPO_BUTTON, view.keylock && "bg-primary text-primary-foreground")}
+        >
+          KEY
+        </button>
         <button type="button" onClick={() => actions.onPercent(0)} title="Back to the track's own tempo" className={TEMPO_BUTTON}>0</button>
       </div>
 
@@ -750,6 +791,7 @@ function Deck({
             status={waveformStatus}
             positionSec={position}
             getPositionSec={getPositionSec}
+            playing={playing}
             durationSec={duration}
             disabled={locked || !duration}
             grid={grid}

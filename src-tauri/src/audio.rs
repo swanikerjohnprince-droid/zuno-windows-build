@@ -19,6 +19,7 @@
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
+use crate::keylock::{Keylock, KeylockControl};
 use crate::position::{Counted, PositionCounter};
 use std::time::{Duration, Instant};
 
@@ -50,6 +51,11 @@ const MAX_SPEED: f32 = 4.0;
 /// few hundred percent is a range, not a pitch bend) so the UI, not the engine, owns the limit.
 const MIN_TEMPO: f32 = 0.5;
 const MAX_TEMPO: f32 = 2.0;
+
+/// Tempo range inside which keylock time-stretches instead of resampling. Outside it (scratching,
+/// extreme pitch) the plain resample is used — Mixxx falls back the same way.
+const KEYLOCK_MIN_TEMPO: f32 = 0.1;
+const KEYLOCK_MAX_TEMPO: f32 = 1.9;
 
 const DEFAULT_DEVICE_POLL: Duration = Duration::from_secs(1);
 
@@ -222,6 +228,11 @@ struct Deck {
     /// Exact position in the recording, counted where the decoder hands samples on. See
     /// `position.rs` for why rodio's own `get_pos` cannot be used once speed is not 1.
     position: Option<Arc<PositionCounter>>,
+    /// Keylock: the tempo fader time-stretches instead of resampling, so the pitch stays put.
+    /// Lives on the deck like the fader, so it survives a transition with the track.
+    keylock: bool,
+    /// Handle to the loaded track's `Keylock` stage; `None` until one is loaded.
+    stretch: Option<Arc<KeylockControl>>,
 }
 
 impl Deck {
@@ -232,6 +243,8 @@ impl Deck {
         self.health = None;
         self.tempo = 1.0;
         self.position = None;
+        self.keylock = false;
+        self.stretch = None;
     }
 
     /// Seconds into the track, whatever the playback speed.
@@ -245,6 +258,23 @@ impl Deck {
     /// False only when a probe exists and says the source is broken. No probe means healthy.
     fn is_healthy(&self) -> bool {
         self.health.as_ref().is_none_or(|probe| probe())
+    }
+
+    /// Pushes the deck's tempo fader (and keylock switch) into the chain.
+    ///
+    /// With keylock on and the tempo inside the stretch range, the sink is told only the global
+    /// rate and the `Keylock` stage consumes the recording at `tempo`, holding the pitch; outside
+    /// that range — or with keylock off — the sink is told `rate * tempo` and rodio resamples,
+    /// pitch included, like a turntable.
+    fn apply_speed(&mut self, rate: f32) {
+        let stretching = self.keylock
+            && self.stretch.is_some()
+            && (KEYLOCK_MIN_TEMPO..=KEYLOCK_MAX_TEMPO).contains(&self.tempo);
+        if let Some(control) = &self.stretch {
+            control.set_tempo(if stretching { self.tempo } else { 1.0 });
+        }
+        let sink_speed = if stretching { rate } else { rate * self.tempo };
+        self.sink.set_speed(sink_speed.clamp(MIN_SPEED, MAX_SPEED));
     }
 }
 
@@ -309,11 +339,17 @@ pub(crate) enum Command {
         standby_volume: f32,
     },
     /// Sets the tempo of the active and standby decks independently, each a multiplier on the
-    /// track's own speed (1.0 = unchanged). This is the DJ pitch fader: it changes pitch along
-    /// with speed, like a turntable, because rodio resamples rather than time-stretching.
+    /// track's own speed (1.0 = unchanged). This is the DJ pitch fader: with keylock off it
+    /// changes pitch along with speed, like a turntable, because rodio resamples rather than
+    /// time-stretching.
     SetDeckTempos {
         active_tempo: f32,
         standby_tempo: f32,
+    },
+    /// Turns keylock (pitch-preserving tempo) on or off for each deck.
+    SetDeckKeylock {
+        active_keylock: bool,
+        standby_keylock: bool,
     },
     /// Whether `track_id` is sitting decoded on the standby deck.
     HasStandby {
@@ -734,6 +770,8 @@ fn run(
             duration_sec: 0.0,
             health: None,
             tempo: 1.0,
+            keylock: false,
+            stretch: None,
             position: None,
         },
         Deck {
@@ -742,6 +780,8 @@ fn run(
             duration_sec: 0.0,
             health: None,
             tempo: 1.0,
+            keylock: false,
+            stretch: None,
             position: None,
         },
     ];
@@ -861,15 +901,18 @@ impl Engine {
 
                 let deck = &mut self.decks[index];
                 deck.sink.stop();
-                // Counted before rodio's speed stage, so what it reports is track time.
+                // Counted before rodio's speed stage, so what it reports is track time; Keylock
+                // wraps it so the tempo fader can stretch the time without moving the pitch.
                 let (counted, position) = Counted::new(source);
-                deck.sink.append(counted);
+                let (keylocked, control) = Keylock::new(counted);
+                deck.sink.append(keylocked);
                 deck.position = Some(position);
+                deck.stretch = Some(control);
                 deck.sink.pause();
                 deck.sink.set_volume(volume);
                 // A freshly loaded track starts at its own speed; the frontend re-sends the fader.
                 deck.tempo = 1.0;
-                deck.sink.set_speed(rate.clamp(MIN_SPEED, MAX_SPEED));
+                deck.apply_speed(rate);
                 deck.track_id = Some(track_id);
                 deck.duration_sec = duration;
                 deck.health = health;
@@ -930,7 +973,7 @@ impl Engine {
             Command::Rate(rate) => {
                 self.rate = rate.clamp(MIN_SPEED, MAX_SPEED);
                 for index in 0..self.decks.len() {
-                    self.decks[index].sink.set_speed(self.speed_of(index));
+                    self.decks[index].apply_speed(self.rate);
                 }
             }
             Command::Transition { track_id, fade_ms, reply } => {
@@ -963,7 +1006,7 @@ impl Engine {
                 self.decks[standby]
                     .sink
                     .set_volume(if fade_ms > 0 { incoming_from } else { target });
-                self.decks[standby].sink.set_speed(self.speed_of(standby));
+                self.decks[standby].apply_speed(self.rate);
                 self.decks[standby].sink.play();
 
                 let outgoing = self.active;
@@ -992,7 +1035,7 @@ impl Engine {
                     return false;
                 }
                 self.cancel_fade();
-                self.decks[standby].sink.set_speed(self.speed_of(standby));
+                self.decks[standby].apply_speed(self.rate);
                 self.decks[standby].sink.set_volume(volume.clamp(0.0, self.output_volume()));
                 self.decks[standby].sink.play();
                 let _ = reply.send(true);
@@ -1038,8 +1081,16 @@ impl Engine {
                 let active = self.active;
                 self.decks[active].tempo = active_tempo.clamp(MIN_TEMPO, MAX_TEMPO);
                 self.decks[standby].tempo = standby_tempo.clamp(MIN_TEMPO, MAX_TEMPO);
-                self.decks[active].sink.set_speed(self.speed_of(active));
-                self.decks[standby].sink.set_speed(self.speed_of(standby));
+                self.decks[active].apply_speed(self.rate);
+                self.decks[standby].apply_speed(self.rate);
+            }
+            Command::SetDeckKeylock { active_keylock, standby_keylock } => {
+                let standby = self.standby();
+                let active = self.active;
+                self.decks[active].keylock = active_keylock;
+                self.decks[standby].keylock = standby_keylock;
+                self.decks[active].apply_speed(self.rate);
+                self.decks[standby].apply_speed(self.rate);
             }
             Command::HasStandby { track_id, reply } => {
                 let standby = self.standby();
@@ -1165,8 +1216,9 @@ impl Engine {
         }
     }
 
-    /// What a deck's sink should be told to play at: the global rate (the Settings speed) times
-    /// that deck's own tempo fader, kept inside the range the sink handles well.
+    /// The total speed of a deck's chain, track seconds per output second: `rate * tempo` whether
+    /// the tempo is applied inside the `Keylock` stage (keylock on) or by the sink's resampler
+    /// (keylock off). What `Seek` divides a track position by to get the output time rodio wants.
     fn speed_of(&self, index: usize) -> f32 {
         (self.rate * self.decks[index].tempo).clamp(MIN_SPEED, MAX_SPEED)
     }

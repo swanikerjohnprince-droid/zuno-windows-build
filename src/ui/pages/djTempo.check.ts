@@ -8,6 +8,8 @@
 export {};
 
 import {
+  DEFAULT_KEYLOCK,
+  KEYLOCK_STORAGE_KEY,
   beatTimes,
   clampPercent,
   doubleBpm,
@@ -16,9 +18,11 @@ import {
   halveBpm,
   heardBpm,
   parseBpmOverrides,
+  parseKeylock,
   registerTap,
   resolveBpm,
   serializeBpmOverrides,
+  serializeKeylock,
   syncPercent,
   tempoRatio,
 } from "./djTempo";
@@ -135,5 +139,15 @@ for (let i = 0; i < 700; i += 1) many[`t${i}`] = 100 + (i % 50);
 const kept = parseBpmOverrides(serializeBpmOverrides(many));
 check(Object.keys(kept).length === 500, "saved overrides are bounded");
 check("t699" in kept && !("t0" in kept), "the most recent overrides are the ones kept");
+
+// --- keylock ------------------------------------------------------------------------------------
+check(KEYLOCK_STORAGE_KEY === "zuno.dj.keylock", "the keylock switches have their own storage key");
+check(parseKeylock(null).every(Boolean) && DEFAULT_KEYLOCK.every(Boolean), "nothing saved means keylock on, like Mixxx");
+check(parseKeylock("not json").every(Boolean), "corrupt storage is ignored, not thrown");
+check(parseKeylock("[1,2]").every(Boolean), "an array is not a switch map");
+const switches = parseKeylock('{"A":false,"B":true}');
+check(switches[0] === false && switches[1] === true, "each deck's switch is read on its own");
+const roundTripped = parseKeylock(serializeKeylock([false, true]));
+check(roundTripped[0] === false && roundTripped[1] === true, "the switches survive a save and a load");
 
 console.log("djTempo checks passed");

@@ -15,7 +15,9 @@ import { logInternalError } from "../../internal/logging";
 import type { PlayerControllerActions } from "../../player/playerStore";
 import type { TrackAnalysis } from "../../player/rustAudio";
 import {
+  DEFAULT_KEYLOCK,
   DEFAULT_TEMPO_RANGE,
+  KEYLOCK_STORAGE_KEY,
   TEMPO_RANGES,
   clampPercent,
   doubleBpm,
@@ -23,9 +25,11 @@ import {
   halveBpm,
   heardBpm,
   parseBpmOverrides,
+  parseKeylock,
   registerTap,
   resolveBpm,
   serializeBpmOverrides,
+  serializeKeylock,
   syncPercent,
   tempoRatio,
   type TempoRange,
@@ -115,6 +119,8 @@ export interface DeckTempoView {
   /** Settings' playback speed, which multiplies with the fader. */
   globalRate: number;
   canSync: boolean;
+  /** Keylock: the fader time-stretches instead of changing pitch. */
+  keylock: boolean;
   notice: string | null;
 }
 
@@ -122,6 +128,7 @@ export interface DeckTempoActions {
   onPercent: (percent: number) => void;
   onRange: (range: TempoRange) => void;
   onSync: () => void;
+  onKeylock: () => void;
   onTap: () => void;
   onHalve: () => void;
   onDouble: () => void;
@@ -195,10 +202,20 @@ export function useDjTempo({
     }
   });
   const [tempoNotice, setTempoNotice] = useState<{ A: string | null; B: string | null }>({ A: null, B: null });
+  // Keylock per deck, remembered across sessions: with it on, the fader time-stretches and the
+  // pitch stays put (Mixxx's keylock, on by default there too).
+  const [keylock, setKeylock] = useState<[boolean, boolean]>(() => {
+    try {
+      return parseKeylock(window.localStorage.getItem(KEYLOCK_STORAGE_KEY));
+    } catch {
+      return [...DEFAULT_KEYLOCK];
+    }
+  });
   const tapsRef = useRef<{ A: number[]; B: number[] }>({ A: [], B: [] });
   const noticeTimers = useRef<{ A?: number; B?: number }>({});
   /** What the engine has last been told, readable from callbacks that outlive a render. */
   const temposRef = useRef<[number, number]>([1, 1]);
+  const keylockRef = useRef<[boolean, boolean]>(keylock);
   const deckBRateRef = useRef(1);
 
   // --- tempo: what is heard, per deck ----------------------------------------------------------
@@ -219,7 +236,11 @@ export function useDjTempo({
     temposRef.current = [tempoRatio(pctA), tempoRatio(pctB)];
   });
 
-  // The single path that sends the faders to the engine.
+  useEffect(() => {
+    keylockRef.current = keylock;
+  });
+
+  // The single path that sends the faders and the keylock switches to the engine.
   const reapplyTempos = useCallback(() => {
     void playerController.setDjDeckTempos(temposRef.current[0], temposRef.current[1]).catch((error: unknown) => {
       /*
@@ -229,6 +250,9 @@ export function useDjTempo({
        */
       logInternalError("useDjTempo could not set the deck tempos", error);
     });
+    void playerController.setDjDeckKeylock(keylockRef.current[0], keylockRef.current[1]).catch((error: unknown) => {
+      logInternalError("useDjTempo could not set the deck keylock", error);
+    });
   }, [playerController]);
 
   // Tell the engine on every change that can matter. Also when a deck starts playing: that is
@@ -236,7 +260,7 @@ export function useDjTempo({
   useEffect(() => {
     reapplyTempos();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pctA, pctB, deckA?.id, deckB?.id, deckAPlaying, deckBPlaying, reapplyTempos]);
+  }, [pctA, pctB, keylock, deckA?.id, deckB?.id, deckAPlaying, deckBPlaying, reapplyTempos]);
 
   // The engine resets a deck's tempo when a track loads onto it, and the fader here is remembered
   // per track, so a track that is no longer on a deck must not keep a stale position: loading it
@@ -274,6 +298,14 @@ export function useDjTempo({
     }
   }, [bpmOverrides]);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(KEYLOCK_STORAGE_KEY, serializeKeylock(keylock));
+    } catch {
+      // Private mode: the switch just does not outlive the session.
+    }
+  }, [keylock]);
+
   useEffect(() => () => {
     window.clearTimeout(noticeTimers.current.A);
     window.clearTimeout(noticeTimers.current.B);
@@ -293,6 +325,14 @@ export function useDjTempo({
     if (!track) return;
     const clamped = clampPercent(percent, tempoRange);
     setTempoByTrack((current) => ({ ...current, [track.id]: clamped }));
+  };
+
+  const toggleKeylock = (side: "A" | "B") => {
+    setKeylock((current) => {
+      const next: [boolean, boolean] = [current[0], current[1]];
+      next[side === "A" ? 0 : 1] = !next[side === "A" ? 0 : 1];
+      return next;
+    });
   };
 
   const changeTempoRange = (range: TempoRange) => {
@@ -370,6 +410,7 @@ export function useDjTempo({
       range: tempoRange,
       globalRate,
       canSync: own !== null && otherHeard !== null,
+      keylock: isA ? keylock[0] : keylock[1],
       notice: tempoNotice[side],
     };
   };
@@ -381,6 +422,7 @@ export function useDjTempo({
       onPercent: (percent) => setTempoPercent(side, percent),
       onRange: changeTempoRange,
       onSync: () => syncDeck(side),
+      onKeylock: () => toggleKeylock(side),
       onTap: () => tapDeck(side),
       onHalve: () => {
         if (track && own !== null) setBpmOverride(track.id, halveBpm(own));

@@ -151,3 +151,28 @@ export function serializeBpmOverrides(overrides: Record<string, number>): string
   const entries = Object.entries(overrides).slice(-MAX_SAVED_OVERRIDES);
   return JSON.stringify(Object.fromEntries(entries));
 }
+
+/** Keylock is on unless it was switched off — Mixxx defaults it on, per deck. */
+export const DEFAULT_KEYLOCK: [boolean, boolean] = [true, true];
+export const KEYLOCK_STORAGE_KEY = "zuno.dj.keylock";
+
+/**
+ * Reads the saved per-deck keylock switches. Anything unreadable or not a switch map leaves both
+ * on, the default.
+ */
+export function parseKeylock(raw: string | null): [boolean, boolean] {
+  if (!raw) return [...DEFAULT_KEYLOCK];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [...DEFAULT_KEYLOCK];
+    const switches = parsed as Record<string, unknown>;
+    return [switches.A !== false, switches.B !== false];
+  } catch {
+    return [...DEFAULT_KEYLOCK];
+  }
+}
+
+/** Only two states per deck exist, so this is just the pair, spelled out. */
+export function serializeKeylock(keylock: [boolean, boolean]): string {
+  return JSON.stringify({ A: keylock[0], B: keylock[1] });
+}

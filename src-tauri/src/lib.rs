@@ -46,6 +46,7 @@ mod windows_media;
 mod linux_media;
 
 mod audio;
+mod keylock;
 mod process_memory;
 mod discord_rpc;
 mod equalizer;
@@ -4730,6 +4731,21 @@ fn native_audio_set_deck_tempos(
         .map_err(cache_error)
 }
 
+/// Turns keylock (pitch-preserving tempo) on or off for each deck.
+#[tauri::command]
+fn native_audio_set_deck_keylock(
+    state: tauri::State<'_, audio::NativeAudio>,
+    active_keylock: bool,
+    standby_keylock: bool,
+) -> Result<(), CommandError> {
+    state
+        .send(audio::Command::SetDeckKeylock {
+            active_keylock,
+            standby_keylock,
+        })
+        .map_err(cache_error)
+}
+
 #[tauri::command]
 fn native_audio_set_deck_volumes(
     state: tauri::State<'_, audio::NativeAudio>,
@@ -5750,6 +5766,7 @@ pub fn run() {
             native_audio_seek_standby,
             native_audio_set_deck_volumes,
             native_audio_set_deck_tempos,
+            native_audio_set_deck_keylock,
             native_audio_has_standby,
             native_audio_drop_standby,
             native_audio_drop_active,
