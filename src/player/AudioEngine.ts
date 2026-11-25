@@ -287,6 +287,13 @@ export class AudioEngine {
    */
   private deckTempos: [number, number] = [1, 1];
   /**
+   * Keylock per deck: with it on the tempo fader time-stretches instead of resampling, so the
+   * pitch stays put (Mixxx's keylock). Only the Rust engine can honour it — the `<audio>` element
+   * and the YouTube players only have a playback rate, which always resamples — so the switches
+   * are remembered here and sent wherever a Rust deck is loaded.
+   */
+  private deckKeylock: [boolean, boolean] = [true, true];
+  /**
    * This track is on the IFrame deck even though the selected engine is not `iframe`.
    *
    * Every other branch here asks *what is loaded* — `rustTrackId`, `audio` — rather than what
@@ -920,6 +927,11 @@ export class AudioEngine {
       .catch((error: unknown) => {
         rustAudio.warn("AudioEngine rust standby tempo re-apply failed", error);
       });
+    await rustAudio
+      .setDeckKeylock(this.deckKeylock[0], this.deckKeylock[1])
+      .catch((error: unknown) => {
+        rustAudio.warn("AudioEngine rust standby keylock re-apply failed", error);
+      });
     logInternalInfo("AudioEngine rust preloaded", { trackId });
   }
 
@@ -994,6 +1006,25 @@ export class AudioEngine {
     this.standbyPlayer?.setPlaybackRate?.(this.rateWithTempo(standby));
   }
 
+  /**
+   * Turns keylock (pitch-preserving tempo) on or off for the active and standby decks. Only the
+   * Rust decks can honour it; on the other engines the switch is remembered but changes nothing,
+   * because their playback rate always resamples.
+   */
+  async setDeckKeylock(activeKeylock: boolean, standbyKeylock: boolean): Promise<void> {
+    this.deckKeylock = [activeKeylock, standbyKeylock];
+    if (!this.useRustAudio) return;
+    const targets = deckTempoTargets({
+      rustActive: this.rustTrackId !== null,
+      rustStandby: this.rustStandbyTrackId !== null,
+      native: this.audio !== null,
+      iframe: this.player !== null,
+    });
+    if (targets.includes("rust")) {
+      await rustAudio.setDeckKeylock(activeKeylock, standbyKeylock);
+    }
+  }
+
   /** Whether a transition to `videoId` can skip loading entirely. */
   hasPreloaded(videoId: string): boolean {
     if (this.useRustAudio) return this.rustStandbyTrackId === videoId;
@@ -1033,6 +1064,7 @@ export class AudioEngine {
       this.loadRequestId += 1;
       // Rust promoted the standby deck, so the faders move with it.
       this.deckTempos = [this.deckTempos[1], this.deckTempos[0]];
+      this.deckKeylock = [this.deckKeylock[1], this.deckKeylock[0]];
       rustAudio.adoptTransitioned(videoId, this.rustDurationSec);
       logInternalInfo("AudioEngine.transitionToPreloaded rust", { videoId, fadeMs });
       return true;
@@ -1241,6 +1273,11 @@ export class AudioEngine {
       .setDeckTempos(this.deckTempos[0], this.deckTempos[1])
       .catch((error: unknown) => {
         rustAudio.warn("AudioEngine rust tempo re-apply failed", error);
+      });
+    await rustAudio
+      .setDeckKeylock(this.deckKeylock[0], this.deckKeylock[1])
+      .catch((error: unknown) => {
+        rustAudio.warn("AudioEngine rust keylock re-apply failed", error);
       });
     logInternalInfo("AudioEngine rust audio loaded", {
       videoId,

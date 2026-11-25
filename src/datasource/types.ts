@@ -281,4 +281,11 @@ export interface LibrarySnapshot {
 export type RustAudioSource =
   | { kind: "stream"; url: string; mimeType: string; cookie?: string }
   | { kind: "offline"; trackId: string; mimeType: string }
-  | { kind: "file"; path: string };
+  | { kind: "file"; path: string }
+  /**
+   * A URL the app's own media server already serves from memory (e.g. a shemen loopback
+   * source published by `fetch_audio_source`). The Rust engine resolves it back to that
+   * in-process buffer instead of re-downloading, so analysis and cueing work without a
+   * signed googlevideo URL.
+   */
+  | { kind: "media"; url: string; mimeType: string; byteLength: number };

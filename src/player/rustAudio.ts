@@ -209,6 +209,11 @@ export function setDeckTempos(activeTempo: number, standbyTempo: number): Promis
   return invoke("native_audio_set_deck_tempos", { activeTempo, standbyTempo });
 }
 
+/** Turns keylock (pitch-preserving tempo) on or off for each deck. */
+export function setDeckKeylock(activeKeylock: boolean, standbyKeylock: boolean): Promise<void> {
+  return invoke("native_audio_set_deck_keylock", { activeKeylock, standbyKeylock });
+}
+
 export function pauseStandby(trackId: string): Promise<boolean> {
   return invoke<boolean>("native_audio_pause_standby", { trackId });
 }
