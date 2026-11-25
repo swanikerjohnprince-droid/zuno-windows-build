@@ -6034,7 +6034,7 @@ mod tests {
         )
         .expect("media source");
         assert!(
-            matches!(media, NativeAudioSource::Media { url, byte_length } if url.ends_with("/audio/stream-abc") && byte_length == 1234567)
+            matches!(media, NativeAudioSource::Media { url, byte_length, .. } if url.ends_with("/audio/stream-abc") && byte_length == 1234567)
         );
 
         // snake_case is what the bug accepted; it must not be what the contract accepts.
